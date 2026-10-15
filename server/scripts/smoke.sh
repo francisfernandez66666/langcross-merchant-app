@@ -262,11 +262,37 @@ step "26) 平台 AI 凭据管理（RBAC：非超管不可访问）"
 eq "普通商家访问被拒(FORBIDDEN)" "FORBIDDEN" \
   "$(curl -s "$B/api/admin/ai-credentials" -H "Authorization: Bearer $TOKEN" | J 'd["error"]["code"]')"
 
+step "27) 翻译 Key 管理（RBAC：超管专属，普通商家连列表都不可见）"
+eq "普通商家列 Key 被拒(FORBIDDEN)" "FORBIDDEN" \
+  "$(curl -s "$B/api/admin/translate-keys" -H "Authorization: Bearer $TOKEN" | J 'd["error"]["code"]')"
+
+step "28) 菜品图片：上传 / 公开访问 / 删除"
+# 造一张最小合法 PNG（1x1 红点）：测试不依赖任何外部素材文件
+python3 -c "
+import struct, zlib
+def chunk(t, d):
+    c = t + d
+    return struct.pack('>I', len(d)) + c + struct.pack('>I', zlib.crc32(c) & 0xffffffff)
+png = (b'\x89PNG\r\n\x1a\n'
+       + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+       + chunk(b'IDAT', zlib.compress(b'\x00\xff\x00\x00'))
+       + chunk(b'IEND', b''))
+open('/tmp/lc-smoke-img.png', 'wb').write(png)
+"
+IMGURL=$(curl -s -X POST "$B/api/stores/$SID/dishes/$DISHID/image" -H "Authorization: Bearer $TOKEN" \
+  -F "image=@/tmp/lc-smoke-img.png;type=image/png" | J 'd["image_url"]')
+ne "上传返回 image_url" "$IMGURL"
+eq "图片公开可访问且为 PNG（魔数）" "89504e47" "$(curl -s "$B$IMGURL" | xxd -p -l 4)"
+eq "菜品列表带上 image_url" "True" \
+  "$(curl -s "$B/api/stores/$SID/dishes" -H "Authorization: Bearer $TOKEN" | J 'bool(d["dishes"][0].get("image_url"))')"
+curl -s -X DELETE "$B/api/stores/$SID/dishes/$DISHID/image" -H "Authorization: Bearer $TOKEN" > /dev/null
+eq "删除后图片不可访问(404)" "404" "$(curl -s -o /dev/null -w '%{http_code}' "$B$IMGURL")"
+
 # ─────────────────────────────────────────────────────────────
 printf '\n\033[1m═══ 结果：%d 通过 / %d 失败 ═══\033[0m\n' "$PASS" "$FAIL"
 echo "本次测试门店：$B/s/$SLUG"
 echo "确定性离线兜底测试：bash scripts/smoke_offline.sh"
+echo "超管端到端冒烟　　：bash scripts/smoke_admin.sh（需 psql 提权，见脚本头注释）"
 echo "清理本次测试数据　：bash scripts/reset_test_data.sh"
 
-[ "$FAIL" -eq 0 ] || exit 1
 [ "$FAIL" -eq 0 ] || exit 1

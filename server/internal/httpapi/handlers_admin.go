@@ -52,7 +52,7 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /api/admin/accounts/{id}/role", s.withAuth(s.handlePatchAccountRole))
 	mux.HandleFunc("PATCH /api/admin/accounts/{id}/status", s.withAuth(s.handlePatchAccountStatus))
 
-	// ── 翻译 API Key（商家自行维护） ──
+	// ── 翻译 API Key（★ 超管专属增删改查，租户一律不接触） ──
 	mux.HandleFunc("GET /api/admin/translate-keys", s.withAuth(s.handleListTranslateKeys))
 	mux.HandleFunc("POST /api/admin/translate-keys", s.withAuth(s.handleCreateTranslateKey))
 	mux.HandleFunc("DELETE /api/admin/translate-keys/{id}", s.withAuth(s.handleDeleteTranslateKey))
@@ -510,17 +510,14 @@ func (s *Server) superKeyAdmin(w http.ResponseWriter, r *http.Request) (*domain.
 // ★ 明文绝不进这个接口：列表数据会被浏览器缓存、被截图、被接入前端日志，
 // 只有脱敏串是安全的。要看明文必须走 reveal（一次性 + 落审计）。
 // 租户管理员可调用（只读自己租户），用于确认「本店翻译是否已配好」。
+// handleListTranslateKeys 列翻译 Key（★ 超管专属，与其余 Key 操作同门禁）。
+//
+// 为什么列表也不给租户管理员看：Key 本身就是平台成本凭据，脱敏列表对租户没有
+// 实际用途（他既不能用也不能改），平白多一个信息暴露面。能言 Key 的增删改查
+// 一律只归超管——与 aiCredViewer 的双写 403 教训同理，这里只判一次等级。
 func (s *Server) handleListTranslateKeys(w http.ResponseWriter, r *http.Request) {
-	var tid string
-	if _, t, granted := s.superKeyAdmin(w, r); granted {
-		tid = t
-	} else if _, t2, granted2 := s.tenantAdmin(w, r); granted2 {
-		// 非超管：租户管理员降级为只读（看自己租户的脱敏状态）
-		tid = t2
-	} else {
-		return // 两种鉴权都已写好错误响应
-	}
-	if !s.keysReady(w) {
+	_, tid, allowed := s.superKeyAdmin(w, r)
+	if !allowed || !s.keysReady(w) {
 		return
 	}
 	keys, err := s.repo.ListTranslationKeys(r.Context(), tid)

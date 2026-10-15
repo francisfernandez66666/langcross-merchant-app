@@ -99,6 +99,8 @@ a { color: inherit; }
   border: 1px solid var(--lc-border-strong); border-radius: 12px;
   font-size: 15px; font-family: inherit; outline: none;
 }
+/* 小号输入框：表格内联编辑（如账号角色下拉）用，与行高协调 */
+.lc-input--sm, .lc-select--sm { height: 32px; padding: 0 8px; font-size: 13px; border-radius: 8px; }
 .lc-textarea { height: auto; padding: 12px 14px; resize: vertical; min-height: 84px; }
 .lc-input:focus, .lc-select:focus, .lc-textarea:focus { border-color: var(--lc-accent); }
 .lc-label { display: block; font-size: 13px; color: var(--lc-text-2); margin-bottom: 6px; }
@@ -111,6 +113,7 @@ a { color: inherit; }
 }
 .lc-badge--ok { background: rgba(61, 220, 132, .15); color: var(--lc-ok); }
 .lc-badge--warn { background: rgba(245, 166, 35, .15); color: var(--lc-warn); }
+.lc-badge--err { background: rgba(230, 57, 70, .14); color: var(--lc-accent); }
 .lc-badge--accent { background: var(--lc-accent-soft); color: var(--lc-accent); }
 
 .lc-alert { padding: 12px 14px; border-radius: var(--lc-radius-sm); font-size: 14px; border: 1px solid; }
@@ -267,16 +270,40 @@ a { color: inherit; }
   margin-top: auto; padding-top: 4px;
   font-size: 14px; font-weight: 750; font-variant-numeric: tabular-nums; color: var(--gx-accent);
 }
+/* 招牌卡顶图：出血到卡片边缘（负 margin 抵消卡片内边距），固定比例居中裁切 */
+.gx-scard-img {
+  margin: -13px -13px 4px; width: calc(100% + 26px);
+  aspect-ratio: 16 / 10; object-fit: cover; display: block;
+  border-radius: var(--gx-r) var(--gx-r) 0 0;
+}
+/* 无图占位：与有图同尺寸的暖色块 + 首字，避免卡片高度参差 */
+.gx-scard-img--ph {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 38px; font-weight: 700; color: var(--gx-text-3);
+  background: linear-gradient(150deg, #f6efe6 0%, #efe4d4 100%);
+}
 
 /* ── 菜品行 ── */
 .gx-dishes { list-style: none; margin: 0; padding: 0; }
 .gx-dish {
-  display: flex; align-items: baseline; gap: 14px;
+  /* 有缩略图时与文本顶部对齐（baseline 对齐会让图与文字错位） */
+  display: flex; align-items: flex-start; gap: 14px;
   padding: 14px 0; border-bottom: 1px solid var(--gx-line-soft);
 }
 .gx-dish:last-child { border-bottom: none; }
 .gx-dish.is-out { opacity: .45; }
 .gx-dish-body { flex: 1; min-width: 0; }
+/* 菜品缩略图：固定方图；无图时渲染首字占位块（暖色底 + 弱化字色，视觉上「有意留白」而非空洞） */
+.gx-dish-img {
+  flex-shrink: 0; width: 58px; height: 58px; margin-top: 2px;
+  border-radius: 10px; object-fit: cover; background: var(--gx-line-soft);
+}
+.gx-dish-img--ph {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 24px; font-weight: 700; color: var(--gx-text-3);
+  background: linear-gradient(150deg, #f6efe6 0%, #efe4d4 100%);
+  border: 1px solid var(--gx-line-soft);
+}
 .gx-dish-name {
   font-size: 16.5px; font-weight: 660; line-height: 1.32; letter-spacing: -0.1px;
   overflow-wrap: anywhere;
@@ -617,3 +644,9 @@ table.lc-table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .lc-req-status--done { color: var(--lc-ok); }
 .lc-req-status--cancelled { color: var(--lc-text-3); }
 .lc-req-actions { display: flex; flex-direction: column; gap: 7px; justify-content: center; flex-shrink: 0; }
+
+/* 商家端菜单表格里的菜品缩略图（上传/换图按钮旁的小图） */
+.lc-dish-thumb {
+  width: 34px; height: 34px; border-radius: 8px; object-fit: cover;
+  background: var(--lc-border); vertical-align: middle;
+}

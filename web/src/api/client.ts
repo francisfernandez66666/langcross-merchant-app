@@ -18,6 +18,10 @@ export type Account = {
   tenant_id: string
   /** 角色：super_admin / tenant_admin / org_admin / manager / staff。服务端为准，前端只做体验优化。 */
   role: string
+  /** 显示名（后台列表展示用；登录时不填则空串）。 */
+  display_name?: string
+  /** 账号状态：active / disabled。disabled 的账号登录后后端会拒。 */
+  status?: string
   created_at: string
 }
 
@@ -72,6 +76,7 @@ export type Dish = {
   attrs?: Record<string, unknown>
   sold_out: boolean
   remaining?: number // 剩余份数；null/undefined 表示不限量
+  image_url?: string // 菜品图片 URL（相对路径 /api/uploads/xxx）；空 = 无图，客人端渲染占位块
 }
 
 /** 商家录入菜单的草稿项（P4 预览翻译也复用此结构）。 */
@@ -146,6 +151,56 @@ export type AICredential = {
   created_by?: string
   created_at: number
   updated_at: number
+}
+
+/** 租户（平台超管维护）。active/disabled/expired 是生命周期三态。 */
+export type Tenant = {
+  id: string
+  code: string // 对外短编码（3-32 位小写字母/数字/中划线）
+  name: string
+  status: 'active' | 'disabled' | 'expired'
+  expires_at?: number // 到期时间（Unix 秒）；缺省 = 永久
+  perms?: Record<string, unknown> // 配额与开关（语种白名单 / 日字符上限等）
+  created_at: number
+  stores?: number // 后台列表附带的门店数（不落库）
+  accounts?: number // 后台列表附带的账号数（不落库）
+}
+
+/** 租户翻译 Key（能言开放 API 的凭据）。明文只在「查看明文」时一次性返回。 */
+export type TranslateKey = {
+  id: string
+  tenant_id: string
+  name: string // 别名，便于人识别
+  provider: string // 提供方：lexicorn
+  key_masked: string // 脱敏展示（如 lx-ab…wxyz）
+  mode: string // fast / pro
+  status: 'active' | 'disabled'
+  daily_limit: number // 当日调用上限；0 = 不限
+  last_used_at?: number // 最近一次成功使用（Unix 秒）
+  created_by?: string
+  created_at: number
+  updated_at: number
+}
+
+/** 审计日志一条：谁在什么时间对什么目标做了什么。 */
+export type AuditEntry = {
+  id: number
+  tenant_id: string
+  actor_id: string
+  actor_role: string
+  action: string // 如 create_tenant / key_test
+  target: string // 目标对象 ID
+  detail: string // 人话描述
+  created_at: number // Unix 秒
+}
+
+/** 平台统计（超管概览用的四个总数）。 */
+export type PlatformStats = {
+  ok: boolean
+  tenants: number
+  accounts: number
+  stores: number
+  translation_keys: number
 }
 
 /** 单条评价。`comment_native` 是客人母语原文，`comment_zh` 是回译中文（供商家看）。 */
@@ -233,6 +288,30 @@ const post = <T,>(p: string, body: unknown) =>
 /** PATCH 简写：JSON 序列化请求体。 */
 const patch = <T,>(p: string, body: unknown) =>
   request<T>(p, { method: 'PATCH', body: JSON.stringify(body) })
+
+/**
+ * 文件上传（multipart）。
+ *
+ * 与 post 的区别：multipart 的 boundary 必须由浏览器随 body 自动生成，
+ * 因此这里**不能**复用 request（它默认写死 `application/json`），
+ * 单独走一遍 fetch，只补 Authorization；错误处理与 request 保持一致。
+ */
+async function upload<T>(p: string, file: File, field = 'image'): Promise<T> {
+  const token = tokenStore.get()
+  const fd = new FormData()
+  fd.append(field, file)
+  const res = await fetch(p, {
+    method: 'POST',
+    body: fd,
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
+  if (!res.ok) {
+    const err = data.error as { msg?: string } | undefined
+    throw new Error(err?.msg ?? `请求失败（${res.status}）`)
+  }
+  return data as T
+}
 
 /**
  * 后端接口集合。按「认证 / 商家端 / 客人端 / 多语种 / 预览 / 工具」分区。
@@ -359,6 +438,81 @@ export const api = {
       `/api/admin/ai-credentials/${id}/test`,
       {},
     ),
+
+  // ── 菜品图片（商家端，需登录） ──
+  // 上传/替换菜品图片：multipart 字段名 image；≤5MB，仅 PNG/JPEG/WebP/GIF。
+  // 后端会删掉被替换的旧文件，返回新的图片 URL。
+  uploadDishImage: (storeId: string, dishId: string, file: File) =>
+    upload<{ ok: boolean; image_url: string }>(`/api/stores/${storeId}/dishes/${dishId}/image`, file),
+  // 删除菜品图片（幂等；文件不存在也算成功）。
+  deleteDishImage: (storeId: string, dishId: string) =>
+    request<{ ok: boolean }>(`/api/stores/${storeId}/dishes/${dishId}/image`, { method: 'DELETE' }),
+
+  // ── 平台管理：租户（超管专属） ──
+  listTenants: () => request<{ ok: boolean; tenants: Tenant[] }>('/api/admin/tenants'),
+  // 新建租户：code 是 3-32 位小写字母/数字/中划线，不可与已有租户重复。
+  createTenant: (body: { code: string; name: string; expires_at?: number; perms?: Record<string, unknown> }) =>
+    post<{ ok: boolean; tenant: Tenant }>('/api/admin/tenants', body),
+  // 改租户名 / 停用启用 / 到期时间 / 配额开关。
+  patchTenant: (
+    id: string,
+    body: {
+      name?: string
+      status?: 'active' | 'disabled' | 'expired'
+      expires_at?: number | null // null = 改为永久
+      perms?: Record<string, unknown>
+    },
+  ) => patch<{ ok: boolean; tenant: Tenant }>(`/api/admin/tenants/${id}`, body),
+  // 某租户名下的门店清单（超管跨租户只读查看）。
+  tenantStores: (id: string) => request<{ ok: boolean; stores: Store[] }>(`/api/admin/tenants/${id}/stores`),
+  // 平台总数概览（租户 / 账号 / 门店 / 翻译 Key）。
+  platformStats: () => request<PlatformStats>('/api/admin/stats'),
+  // 我所属的租户信息 + 我的角色（租户管理员看自己，超管返回空）。
+  myTenant: () => request<{ ok: boolean; tenant: Tenant | null; my_role: string }>('/api/admin/my-tenant'),
+
+  // ── 平台管理：账号与角色（超管 / 租户管理员） ──
+  listAccounts: () => request<{ ok: boolean; accounts: Account[] }>('/api/admin/accounts'),
+  // 新建账号：角色不能高于或等于自己的等级；手机号已存在则改为就地改角色。
+  createAccount: (body: { phone: string; role: string; display_name?: string }) =>
+    post<{ ok: boolean; created: boolean; account: Account }>('/api/admin/accounts', body),
+  // 调整已有账号角色（不能改自己、不能授予同级或更高级角色）。
+  patchAccountRole: (id: string, role: string) =>
+    patch<{ ok: boolean; account: Account }>(`/api/admin/accounts/${id}/role`, { role }),
+  // 停用 / 启用账号（不能停用同级或更高级成员）。
+  patchAccountStatus: (id: string, status: 'active' | 'disabled') =>
+    patch<{ ok: boolean; account: Account }>(`/api/admin/accounts/${id}/status`, { status }),
+
+  // ── 平台管理：翻译 Key（★ 超管专属增删改查，租户一律不接触） ──
+  listTranslateKeys: () =>
+    request<{ ok: boolean; keys: TranslateKey[]; active_key_id: string }>('/api/admin/translate-keys'),
+  // 新增翻译 Key：明文只在创建响应里出现一次，此后只能「查看明文」复制。
+  createTranslateKey: (body: { name: string; key: string; mode?: string; daily_limit?: number }) =>
+    post<{ ok: boolean; key: TranslateKey; note: string }>('/api/admin/translate-keys', body),
+  // 查看 Key 明文（一次性返回，且会落审计日志）。
+  revealTranslateKey: (id: string) =>
+    post<{ ok: boolean; api_key: string }>(`/api/admin/translate-keys/${id}/reveal`, {}),
+  // 轮换 Key：新 Key 覆盖，旧的立即失效。
+  rotateTranslateKey: (id: string, key: string) =>
+    post<{ ok: boolean }>(`/api/admin/translate-keys/${id}/rotate`, { key }),
+  // 启用 / 停用 Key（停用后翻译链回落，最多 30s 缓存 TTL 后生效）。
+  setTranslateKeyStatus: (id: string, status: 'active' | 'disabled') =>
+    post<{ ok: boolean }>(`/api/admin/translate-keys/${id}/status`, { status }),
+  // 试译：用这把 Key 真翻一句，验证可用性并顺带带回余额。
+  testTranslateKey: (id: string, text: string, to: string) =>
+    post<{
+      ok: boolean
+      source: string
+      target: string
+      to: string
+      elapsed_ms: number
+      balance?: Record<string, unknown>
+      error?: string
+    }>(`/api/admin/translate-keys/${id}/test`, { text, to }),
+  deleteTranslateKey: (id: string) =>
+    request<{ ok: boolean }>(`/api/admin/translate-keys/${id}`, { method: 'DELETE' }),
+
+  // ── 平台管理：审计（超管全量 / 租户管理员只看本租户） ──
+  listAudit: () => request<{ ok: boolean; audit: AuditEntry[] }>('/api/admin/audit'),
 
   // ── 多语种能力 ──
   // 语种注册表：前端语言清单的唯一来源，不硬编码

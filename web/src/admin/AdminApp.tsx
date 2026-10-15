@@ -10,7 +10,8 @@
  *   - 券与核销 CouponTab：输入客人券码核销 + 已发券列表
  *   - 经营洞察 InsightsTab：扫码 / 评价 / 复券 KPI 与最近评价
  *   - 服务请求 RequestsTab：客人发起的服务铃 / 加水 / 加菜 / 买单待办（轮询 + 完成/取消）
- *   - AI 凭据 AICredentialsTab：平台超管维护 LLM 凭据（仅超管可见；tenant_admin 只读）
+ *   - 平台管理 PlatformTab：超管控制台（概览/租户）+ 租户管理员后台（账号/翻译 Key/审计）
+ *   - AI 凭据 AICredentialsTab：平台超管维护 LLM 凭据（tenant_admin 只读，后端同款门禁）
  *   - 设置 SettingsTab：交付档位、复购券开关、店内 WiFi
  *
  * 涉及的接口（全部经 ../api/client 调用；响应统一为 {ok:true,...}
@@ -28,7 +29,7 @@
  * 登录态：token 存 localStorage（tokenStore），client.ts 会自动给每个请求带上
  * Authorization: Bearer <token>；本文件只在登录 / 登出时读写这个 token。
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   api,
@@ -43,6 +44,7 @@ import {
 } from '../api/client'
 import RequestsTab from './RequestsTab'
 import AICredentialsTab from './AICredentialsTab'
+import PlatformTab from './PlatformTab'
 
 /**
  * 管理台根组件：只做一件事——「有 token 就给控制台，没 token 就给登录页」。
@@ -140,18 +142,21 @@ function Login({ onDone }: { onDone: () => void }) {
 /* ── 控制台外壳 ─────────────────────────────────────────── */
 // Tab 用字符串联合类型而非枚举，配合下面的 TABS 常量做「数据驱动」渲染，
 // 新增一个 Tab 只需在联合类型和 TABS 各加一处，导航栏自动出现。
-type Tab = 'overview' | 'menu' | 'coupon' | 'insights' | 'requests' | 'ai' | 'settings'
+type Tab = 'overview' | 'menu' | 'coupon' | 'insights' | 'requests' | 'platform' | 'ai' | 'settings'
 
 // 左侧导航项：id 用于匹配当前 Tab，label 是展示文案。
 // 顺序即商家日常使用的优先级：先看概览、再维护菜单，券/洞察/服务请求靠后。
-// 「AI 凭据」是平台超管专属入口，普通商家（manager/staff）看不到这一项。
-const TABS: { id: Tab; label: string }[] = [
+// roles 标注了角色的 Tab 只对这些角色可见（权限以服务端为准，前端只是体验优化）：
+//   - 平台管理：超管与租户管理员（前者多出概览/租户分区，后者管账号/翻译 Key）
+//   - AI 凭据：超管可写；tenant_admin 只读（后端同款门禁，列表里 can_write 区分）
+const TABS: { id: Tab; label: string; roles?: string[] }[] = [
   { id: 'overview', label: '概览' },
   { id: 'menu', label: '菜单' },
   { id: 'coupon', label: '券与核销' },
   { id: 'insights', label: '经营洞察' },
   { id: 'requests', label: '服务请求' },
-  { id: 'ai', label: 'AI 凭据' },
+  { id: 'platform', label: '平台管理', roles: ['super_admin', 'tenant_admin'] },
+  { id: 'ai', label: 'AI 凭据', roles: ['super_admin', 'tenant_admin'] },
   { id: 'settings', label: '设置' },
 ]
 
@@ -188,6 +193,10 @@ function Console({ onLogout }: { onLogout: () => void }) {
   // 当前门店对象：可能是 undefined（加载中 / 该账号一家店都没有）。
   const store = stores.find((s) => s.id === storeId)
 
+  // 平台角色（超管 / 租户管理员）可能一家门店都没有——他们的舞台是平台管理 Tab，
+  // 因此「没有门店」对他们不是死路，只是看不到门店级 Tab。
+  const isPlatformRole = account?.role === 'super_admin' || account?.role === 'tenant_admin'
+
   // 装载失败优先展示（最常见是 token 过期），并给出退出登录的出路。
   if (err) {
     return (
@@ -200,9 +209,9 @@ function Console({ onLogout }: { onLogout: () => void }) {
     )
   }
 
-  // 账号名下没有任何门店：引导去走引导流建店。
+  // 账号名下没有任何门店（且不是平台角色）：引导去走引导流建店。
   // 注意：门店列表尚未加载完时 stores 也是空的，这一分支会短暂闪现（见文末说明）。
-  if (!store) {
+  if (!store && !isPlatformRole) {
     return (
       <div className="lc-center">
         <h2>还没有门店</h2>
@@ -219,8 +228,15 @@ function Console({ onLogout }: { onLogout: () => void }) {
       <nav className="admin-nav">
         <div className="brand">能言 · 商家店端</div>
         {/* 数据驱动渲染导航：当前 Tab 加 is-on 高亮。
-            「AI 凭据」仅超管可见（权限以服务端为准，这里只是体验优化）。 */}
-        {TABS.filter((t) => t.id !== 'ai' || account?.role === 'super_admin').map((t) => (
+            可见性两层规则：
+            1) 平台角色（超管/租户管理员）若一家门店都没有，只展示平台级 Tab
+               （平台管理 / AI 凭据）——他们没有门店可管，别拿空页面烦他们；
+            2) 有门店（或非平台角色）时按 roles 过滤：未标注 = 所有人可见，
+               标注了 = 仅列出的角色可见（真准入仍以服务端为准）。 */}
+        {TABS.filter((t) => {
+          if (!store) return t.id === 'platform' || t.id === 'ai'
+          return !t.roles || (account?.role != null && t.roles.includes(account.role))
+        }).map((t) => (
           <button key={t.id} className={tab === t.id ? 'is-on' : ''} onClick={() => setTab(t.id)}>
             {t.label}
           </button>
@@ -232,7 +248,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
 
       <main className="admin-main">
         {/* 多门店账号才显示切换器；单店商家不打扰 */}
-        {stores.length > 1 && (
+        {store && stores.length > 1 && (
           <div style={{ marginBottom: 16 }}>
             <label className="lc-label">门店</label>
             <select className="lc-select" style={{ maxWidth: 280 }} value={storeId} onChange={(e) => setStoreId(e.target.value)}>
@@ -245,14 +261,16 @@ function Console({ onLogout }: { onLogout: () => void }) {
           </div>
         )}
 
-        {/* 按当前 Tab 挂载对应子组件；store 一定非空（上面已提前 return） */}
-        {tab === 'overview' && <Overview store={store} />}
-        {tab === 'menu' && <MenuTab store={store} />}
-        {tab === 'coupon' && <CouponTab store={store} />}
-        {tab === 'insights' && <InsightsTab store={store} />}
-        {tab === 'requests' && <RequestsTab store={store} />}
+        {/* 按当前 Tab 挂载对应子组件。门店级 Tab 都要求 store 非空（平台角色无门店时
+            这些 Tab 不会出现在导航里，这里的 && 兜底防止误渲染空组件）。 */}
+        {tab === 'overview' && store && <Overview store={store} />}
+        {tab === 'menu' && store && <MenuTab store={store} />}
+        {tab === 'coupon' && store && <CouponTab store={store} />}
+        {tab === 'insights' && store && <InsightsTab store={store} />}
+        {tab === 'requests' && store && <RequestsTab store={store} />}
+        {tab === 'platform' && account && <PlatformTab account={account} />}
         {tab === 'ai' && account && <AICredentialsTab account={account} />}
-        {tab === 'settings' && <SettingsTab store={store} onSaved={reload} />}
+        {tab === 'settings' && store && <SettingsTab store={store} onSaved={reload} />}
       </main>
     </div>
   )
@@ -327,7 +345,7 @@ function Overview({ store }: { store: Store }) {
 
 /* ── 菜单：多语种覆盖 / 补翻 / 售罄 ──────────────────────── */
 /**
- * 菜单 Tab：语种覆盖一览 + 「补充语种」批量补翻 + 售罄开关。
+ * 菜单 Tab：语种覆盖一览 + 「补充语种」批量补翻 + 售罄开关 + 菜品图片。
  *
  * @param store 当前选中的门店
  *
@@ -337,6 +355,9 @@ function Overview({ store }: { store: Store }) {
  *   - 覆盖率 = 该语种已有译文的菜数 / 总菜数（百分比），用颜色一眼看出哪门语言还没翻。
  *   - 「补充语种」是增量补翻：后端对已有译文不重复翻，所以可以放心重复点，省翻译配额。
  *   - 售罄是唯一需要天天维护的字段；不维护就不显示，也不会报错。
+ *   - 菜品图片走 POST/DELETE /api/stores/{id}/dishes/{dishId}/image：
+ *     每行一个「上传」按钮触发隐藏的文件选择框，选完即传；有图时才出现「删除」。
+ *     前端只做类型与体积的粗校验（省一次往返），真正的边界以后端为准。
  */
 function MenuTab({ store }: { store: Store }) {
   const [dishes, setDishes] = useState<Dish[]>([]) // 门店全部菜品（含多语名 names 与售罄状态）
@@ -345,6 +366,9 @@ function MenuTab({ store }: { store: Store }) {
   const [busy, setBusy] = useState(false) // 补翻请求进行中
   const [pickOpen, setPickOpen] = useState(false) // 「补充语种」面板是否展开
   const [picked, setPicked] = useState<string[]>([]) // 面板里勾选待补翻的语种 code
+  const [imgDishId, setImgDishId] = useState('') // 当前正在上传图片的菜品 id（空 = 无）
+  const [imgBusy, setImgBusy] = useState(false) // 图片上传进行中（禁用按钮防重复提交）
+  const fileRef = useRef<HTMLInputElement>(null) // 隐藏的文件选择框（全局一个，按 imgDishId 归属）
 
   /** 重新拉取菜品列表（补翻 / 切售罄后都要刷新）。 */
   const load = useCallback(() => {
@@ -392,6 +416,55 @@ function MenuTab({ store }: { store: Store }) {
       setMsg((e as Error).message)
     } finally {
       setBusy(false)
+    }
+  }
+
+  /** 点「上传」：记下菜品 id 并弹出隐藏的文件选择框。 */
+  const pickImage = (d: Dish) => {
+    setImgDishId(d.id)
+    fileRef.current?.click()
+  }
+
+  /** 文件选定后上传。先做类型/体积粗校验（与后端常量一致），过了再发请求。 */
+  const onFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    // 无论成败都要清空 input：否则同一个文件第二次选不会触发 change
+    e.target.value = ''
+    if (!file || !imgDishId) return
+    if (!file.type.startsWith('image/')) {
+      setMsg('请选择图片文件（PNG / JPEG / WebP / GIF）')
+      return
+    }
+    if (file.size > 5 << 20) {
+      setMsg('图片不能超过 5MB，请压缩后重试')
+      return
+    }
+    setImgBusy(true)
+    setMsg('')
+    try {
+      await api.uploadDishImage(store.id, imgDishId, file)
+      setMsg('图片已更新。')
+      load()
+    } catch (err) {
+      setMsg((err as Error).message)
+    } finally {
+      setImgBusy(false)
+      setImgDishId('')
+    }
+  }
+
+  /** 删除菜品图片（幂等）。 */
+  const removeImage = async (d: Dish) => {
+    setImgBusy(true)
+    setMsg('')
+    try {
+      await api.deleteDishImage(store.id, d.id)
+      setMsg('图片已删除。')
+      load()
+    } catch (err) {
+      setMsg((err as Error).message)
+    } finally {
+      setImgBusy(false)
     }
   }
 
@@ -461,12 +534,15 @@ function MenuTab({ store }: { store: Store }) {
       {msg && <div className="lc-alert lc-alert--info">{msg}</div>}
 
       <div className="lc-card" style={{ padding: 0 }}>
+        {/* 隐藏的文件选择框：由每行的「上传」按钮触发，选定后上传到当前 imgDishId */}
+        <input ref={fileRef} type="file" accept="image/*" hidden onChange={onFilePicked} />
         <table className="lc-table">
           <thead>
             <tr>
               <th>中文原文</th>
               <th>English</th>
               <th>分类</th>
+              <th>图片</th>
               <th style={{ textAlign: 'right' }}>价格</th>
               <th style={{ textAlign: 'right' }}>已译语种</th>
               <th style={{ textAlign: 'right' }}>状态</th>
@@ -484,6 +560,37 @@ function MenuTab({ store }: { store: Store }) {
                   {/* English 列直接取 names.en（即兼容字段 name_en 的来源），没有则显示「未命中」 */}
                   <td>{d.names?.en || <span className="lc-dim">未命中</span>}</td>
                   <td>{d.category || '-'}</td>
+                  {/* 图片列：有图显示缩略图 + 删除；无图只有上传按钮 */}
+                  <td>
+                    <div className="lc-row" style={{ gap: 6, alignItems: 'center' }}>
+                      {d.image_url ? (
+                        <img
+                          className="lc-dish-thumb"
+                          src={d.image_url}
+                          alt={d.name_zh}
+                          loading="lazy"
+                          onError={(e) => {
+                            // 图挂了就藏掉 alt 占位，别留一个碎图icon
+                            ;(e.target as HTMLImageElement).style.visibility = 'hidden'
+                          }}
+                        />
+                      ) : (
+                        <span className="lc-dim">无图</span>
+                      )}
+                      <button
+                        className="lc-btn lc-btn--sm lc-btn--ghost"
+                        disabled={imgBusy}
+                        onClick={() => pickImage(d)}
+                      >
+                        {imgBusy && imgDishId === d.id ? '上传中…' : d.image_url ? '换图' : '上传'}
+                      </button>
+                      {d.image_url && (
+                        <button className="lc-btn lc-btn--sm lc-btn--ghost" disabled={imgBusy} onClick={() => removeImage(d)}>
+                          删除
+                        </button>
+                      )}
+                    </div>
+                  </td>
                   <td style={{ textAlign: 'right' }}>{d.price != null ? `¥${d.price}` : '-'}</td>
                   <td style={{ textAlign: 'right' }}>
                     {/* 覆盖率胶囊：已译语种数 / 目标语种总数；hover 显示具体是哪几个语种 */}
@@ -505,7 +612,7 @@ function MenuTab({ store }: { store: Store }) {
             {/* 空态：引导商家去引导流上传菜单 */}
             {dishes.length === 0 && (
               <tr>
-                <td colSpan={7} className="lc-dim" style={{ padding: 20, textAlign: 'center' }}>
+                <td colSpan={8} className="lc-dim" style={{ padding: 20, textAlign: 'center' }}>
                   暂无菜品，去引导流上传菜单
                 </td>
               </tr>

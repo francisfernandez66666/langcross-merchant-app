@@ -243,6 +243,15 @@ export default function StorePage() {
               const ti = title(d)
               return (
                 <div className={`gx-scard ${d.sold_out ? 'is-out' : ''}`} key={d.id}>
+                  {/* 菜品图片：有图用图，无图用「首字占位块」——占位块比留白更整齐，
+                      也避免未上传图的店出现参差不齐的空洞 */}
+                  {d.image_url ? (
+                    <img className="gx-scard-img" src={d.image_url} alt={ti.text} loading="lazy" />
+                  ) : (
+                    <div className="gx-scard-img gx-scard-img--ph" aria-hidden>
+                      {(ti.text || d.name_zh).slice(0, 1)}
+                    </div>
+                  )}
                   <div className="gx-scard-name">
                     {/* L1：招牌位同样以目标语言为主标题 */}
                     {ti.text}
@@ -273,6 +282,15 @@ export default function StorePage() {
                 const ti = title(d)
                 return (
                   <li className={`gx-dish ${d.sold_out ? 'is-out' : ''}`} key={d.id}>
+                    {/* 菜品缩略图：有图用图（左侧固定方图），无图用首字占位块。
+                        aria-hidden 的占位不含信息，图片 alt 才承担可访问性 */}
+                    {d.image_url ? (
+                      <img className="gx-dish-img" src={d.image_url} alt={ti.text} loading="lazy" />
+                    ) : (
+                      <div className="gx-dish-img gx-dish-img--ph" aria-hidden>
+                        {(ti.text || d.name_zh).slice(0, 1)}
+                      </div>
+                    )}
                     <div className="gx-dish-body">
                       <div className="gx-dish-name">
                         {/* L3：缺译文时加 `.gx-pending-text` 弱化斜体，区别于正常译文 */}
