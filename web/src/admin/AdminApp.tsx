@@ -4,11 +4,13 @@
  * 本文件负责「门店已上线之后」的全部日常经营操作，是引导流（Onboarding.tsx）的下游：
  * 引导流只负责把门店「生出来」，之后每天的菜单维护、发券核销、看数据都在这里。
  *
- * 页面结构（左侧导航切换的 5 个 Tab，均为本文件内的子组件）：
+ * 页面结构（左侧导航切换的 Tab，均为本文件内的子组件）：
  *   - 概览 Overview：门店状态徽标 + 门口码 / 桌码 / 门店页链接（物料）
  *   - 菜单 MenuTab：语种覆盖率一览、「补充语种」批量补翻、售罄开关
  *   - 券与核销 CouponTab：输入客人券码核销 + 已发券列表
  *   - 经营洞察 InsightsTab：扫码 / 评价 / 复券 KPI 与最近评价
+ *   - 服务请求 RequestsTab：客人发起的服务铃 / 加水 / 加菜 / 买单待办（轮询 + 完成/取消）
+ *   - AI 凭据 AICredentialsTab：平台超管维护 LLM 凭据（仅超管可见；tenant_admin 只读）
  *   - 设置 SettingsTab：交付档位、复购券开关、店内 WiFi
  *
  * 涉及的接口（全部经 ../api/client 调用；响应统一为 {ok:true,...}
@@ -39,6 +41,8 @@ import {
   type Store,
   type StoreLinks,
 } from '../api/client'
+import RequestsTab from './RequestsTab'
+import AICredentialsTab from './AICredentialsTab'
 
 /**
  * 管理台根组件：只做一件事——「有 token 就给控制台，没 token 就给登录页」。
@@ -136,15 +140,18 @@ function Login({ onDone }: { onDone: () => void }) {
 /* ── 控制台外壳 ─────────────────────────────────────────── */
 // Tab 用字符串联合类型而非枚举，配合下面的 TABS 常量做「数据驱动」渲染，
 // 新增一个 Tab 只需在联合类型和 TABS 各加一处，导航栏自动出现。
-type Tab = 'overview' | 'menu' | 'coupon' | 'insights' | 'settings'
+type Tab = 'overview' | 'menu' | 'coupon' | 'insights' | 'requests' | 'ai' | 'settings'
 
 // 左侧导航项：id 用于匹配当前 Tab，label 是展示文案。
-// 顺序即商家日常使用的优先级：先看概览、再维护菜单，券/洞察/设置靠后。
+// 顺序即商家日常使用的优先级：先看概览、再维护菜单，券/洞察/服务请求靠后。
+// 「AI 凭据」是平台超管专属入口，普通商家（manager/staff）看不到这一项。
 const TABS: { id: Tab; label: string }[] = [
   { id: 'overview', label: '概览' },
   { id: 'menu', label: '菜单' },
   { id: 'coupon', label: '券与核销' },
   { id: 'insights', label: '经营洞察' },
+  { id: 'requests', label: '服务请求' },
+  { id: 'ai', label: 'AI 凭据' },
   { id: 'settings', label: '设置' },
 ]
 
@@ -211,8 +218,9 @@ function Console({ onLogout }: { onLogout: () => void }) {
     <div className="admin-shell">
       <nav className="admin-nav">
         <div className="brand">能言 · 商家店端</div>
-        {/* 数据驱动渲染导航：当前 Tab 加 is-on 高亮 */}
-        {TABS.map((t) => (
+        {/* 数据驱动渲染导航：当前 Tab 加 is-on 高亮。
+            「AI 凭据」仅超管可见（权限以服务端为准，这里只是体验优化）。 */}
+        {TABS.filter((t) => t.id !== 'ai' || account?.role === 'super_admin').map((t) => (
           <button key={t.id} className={tab === t.id ? 'is-on' : ''} onClick={() => setTab(t.id)}>
             {t.label}
           </button>
@@ -242,6 +250,8 @@ function Console({ onLogout }: { onLogout: () => void }) {
         {tab === 'menu' && <MenuTab store={store} />}
         {tab === 'coupon' && <CouponTab store={store} />}
         {tab === 'insights' && <InsightsTab store={store} />}
+        {tab === 'requests' && <RequestsTab store={store} />}
+        {tab === 'ai' && account && <AICredentialsTab account={account} />}
         {tab === 'settings' && <SettingsTab store={store} onSaved={reload} />}
       </main>
     </div>

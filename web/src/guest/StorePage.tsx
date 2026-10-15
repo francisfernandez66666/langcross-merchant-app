@@ -40,6 +40,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { api, type Coupon, type Dish, type Lang, type Store } from '../api/client'
 import { PHRASES, langLabel, phraseText, t } from './i18n'
+import GuestAssistant from './GuestAssistant'
 
 /**
  * 浏览器语言 → 受支持语种（en-US → en）。
@@ -91,6 +92,7 @@ export default function StorePage() {
   const [err, setErr] = useState('')
   const [rateOpen, setRateOpen] = useState(false) // 三维度评价弹层
   const [helpOpen, setHelpOpen] = useState(false) // 问店员短语卡
+  const [assistOpen, setAssistOpen] = useState(false) // AI 点菜助手面板
   const [langOpen, setLangOpen] = useState(false) // 语言选择弹层
   const [coupon, setCoupon] = useState<Coupon | null>(null) // 评价成功后后端发的券
   const [couponGift, setCouponGift] = useState('') // 券面文案（后端已本地化）
@@ -312,12 +314,16 @@ export default function StorePage() {
       {/* L5：非中文且确有菜单内容时，明确告知「机器翻译，疑问问店员」 */}
       {lang !== 'zh' && dishes.length > 0 && <p className="gx-note">{t('machineNote', lang)}</p>}
 
-      {/* 底部固定操作条：左「问店员」（无网兜底），右「评价领券」（主转化路径） */}
+      {/* 底部固定操作条：AI 点菜助手（首选） / 问店员（无网兜底） / 评价领券（主转化）。
+          三个按钮在窄屏下各占一份宽度，文案已尽量短，必要时可换行。 */}
       <div className="gx-bar">
+        <button className="gx-btn gx-btn--primary" onClick={() => setAssistOpen(true)}>
+          🤖 {t('aiTitle', lang)}
+        </button>
         <button className="gx-btn gx-btn--ghost" onClick={() => setHelpOpen(true)}>
           {t('ask', lang)}
         </button>
-        <button className="gx-btn gx-btn--primary" onClick={() => setRateOpen(true)}>
+        <button className="gx-btn gx-btn--ghost" onClick={() => setRateOpen(true)}>
           {t('rate', lang)}
         </button>
       </div>
@@ -340,6 +346,21 @@ export default function StorePage() {
 
       {/* 问店员短语卡（无网兜底） */}
       {helpOpen && <HelpSheet lang={lang} onClose={() => setHelpOpen(false)} />}
+
+      {/* AI 点菜助手面板：语音 + 文字问答 + 加菜/服务铃动作。
+          转真人店员时先关助手、再开短语卡（两者互斥一层，避免叠加）。 */}
+      {assistOpen && (
+        <GuestAssistant
+          slug={slug}
+          lang={lang}
+          refCode={ref}
+          onClose={() => setAssistOpen(false)}
+          onTalkToStaff={() => {
+            setAssistOpen(false)
+            setHelpOpen(true)
+          }}
+        />
+      )}
 
       {/* 语言选择层：选中即写回 lang 并关闭 */}
       {langOpen && (

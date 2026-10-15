@@ -9,7 +9,11 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/domain"
+	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/service"
 )
 
 // ctxKey 是 context 键的私有类型。
@@ -18,9 +22,12 @@ import (
 // 私有类型从根上避免了这种冲突（这是 Go 官方推荐的 context 用法）。
 type ctxKey string
 
-// ctxAccountID 是注入「当前登录账号 ID」的 context 键。
-// 只有 withAuth 会写它，业务 handler 一律通过 accountID(r) 读，不要直接拼 key。
-const ctxAccountID ctxKey = "account_id"
+// ctxAccount 是注入「当前登录账号主体」的 context 键。
+//
+// 为什么注入整个账号而不只是 ID：角色与租户是每个请求都要用的
+// （requireStore 要判权、翻译链要按租户取 Key），若只注入 ID，
+// 每个 handler 都得再查一次库；注入主体后一次查询全链路复用。
+const ctxAccount ctxKey = "account"
 
 // withCORS 允许前端 dev server（Vite）跨域访问。
 //
@@ -54,11 +61,16 @@ func withLog(next http.Handler) http.Handler {
 	})
 }
 
-// withAuth 校验 Bearer token，并把 account_id 注入 context。
+// withAuth 校验 Bearer token，加载账号主体并注入 context。
 //
 // 这是商家端的统一鉴权入口：校验失败直接 401 + UNAUTH，不进入 handler。
-// 通过后 handler 用 accountID(r) 取当前账号，再结合 requireStore 判断
-// 「这个门店是不是你的」，就构成了「认证（你是谁）+ 授权（你能不能碰）」两层防线。
+// 通过后 handler 用 currentAccount(r) 取账号（含角色 / 租户 / 状态），
+// 再结合 requireStore 判断「这个门店是不是你的」，构成
+// 「认证（你是谁）+ 授权（你能不能碰）」两层防线。
+//
+// ★ 每请求都回库取账号而不是只信任 token 里的 ID：角色调整、停用账号
+// 必须立刻生效。token 是无状态的（30 天），无法单方面吊销，
+// 那就只能让「权限判断」这一步始终读最新事实。
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := verifyToken(s.secret, bearerToken(r))
@@ -66,15 +78,85 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			fail(w, http.StatusUnauthorized, CodeUnauth, "请先登录")
 			return
 		}
-		next(w, r.WithContext(context.WithValue(r.Context(), ctxAccountID, id)))
+		acc, err := s.repo.GetAccountByID(r.Context(), id)
+		if err != nil {
+			// token 有效但账号没了：按未登录处理，让前端退回登录页
+			fail(w, http.StatusUnauthorized, CodeUnauth, "账号不存在")
+			return
+		}
+		// 停用的账号禁止一切操作（数据保留，只是不能再进系统）
+		if acc.Status != "active" {
+			fail(w, http.StatusForbidden, CodeForbidden, "账号已停用，请联系管理员")
+			return
+		}
+		ctx := context.WithValue(r.Context(), ctxAccount, acc)
+		// 同时把租户写进 context：翻译链据此按租户取 Key（见 service.WithTenantID）
+		ctx = service.WithTenantID(ctx, acc.TenantID)
+		next(w, r.WithContext(ctx))
 	}
 }
 
-// accountID 取出 withAuth 注入的账号 ID；未登录（未走 withAuth）时返回空串。
+// currentAccount 取出 withAuth 注入的账号主体；未登录时返回 nil。
+//
+// 所有 handler 都通过它取账号，不要再去查库——既省一次往返，
+// 也保证「权限判断」与「业务查询」看到的是同一个快照。
+func currentAccount(r *http.Request) *domain.Account {
+	v, _ := r.Context().Value(ctxAccount).(*domain.Account)
+	return v
+}
+
+// accountID 兼容旧写法：取出当前账号 ID；未登录（未走 withAuth）时返回空串。
 //
 // 空串不是合法账号 ID，因此即便某个 handler 误漏了鉴权，也会在 requireStore
 // 的归属校验处失败，而不会意外读到别人的数据。
+// 新代码请优先用 currentAccount(r)：需要角色 / 租户时不必再查库。
 func accountID(r *http.Request) string {
-	v, _ := r.Context().Value(ctxAccountID).(string)
-	return v
+	if acc := currentAccount(r); acc != nil {
+		return acc.ID
+	}
+	return ""
+}
+
+// requireRole 要求当前账号的角色等级不低于 min（domain.RoleLevel 口径）。
+//
+// 返回 (nil, false) 时错误响应已经写好，调用方直接 return 即可。
+// 刻意分成 401 / 403 两档：没登录是 401，登录了但等级不够是 403——
+// 前端要靠这个区别决定「跳登录页」还是「提示无权限」。
+//
+// ★ 平台级双条件（抄自翻译助手 2026-09-16 安全整改）：当 min 达到最高等级时，
+// 除了角色等级还必须 TenantID 为空串（平台级账号）。否则一条
+// 「role=super_admin 但挂在某租户下」的旁路数据就能拿到跨租户权能——
+// 那种账号在翻译助手的现网里真实存在过，并被用来跨租户退款。
+func (s *Server) requireRole(w http.ResponseWriter, r *http.Request, min int) (*domain.Account, bool) {
+	acc := currentAccount(r)
+	if acc == nil {
+		fail(w, http.StatusUnauthorized, CodeUnauth, "请先登录")
+		return nil, false
+	}
+	if domain.RoleLevel(acc.Role) < min {
+		fail(w, http.StatusForbidden, CodeForbidden, "权限不足：需要 "+domain.RoleNameByLevel(min)+"及以上")
+		return nil, false
+	}
+	// 最高等级额外要求平台级归属
+	if min >= domain.MaxRoleLevel && !domain.IsPlatformSuperAdmin(acc) {
+		fail(w, http.StatusForbidden, CodeForbidden, "权限不足：该操作仅限平台级超管")
+		return nil, false
+	}
+	return acc, true
+}
+
+// effectiveTenant 解析「这次操作作用在哪个租户上」。
+//
+//   - 平台超管显式传 ?tenant_id=xxx 时可作用于任意租户（后台跨租户运维）；
+//     不传则落到默认租户（平台自营的那份数据）；
+//   - 其他人只能作用于自己所属租户，并忽略任何传入的 tenant_id——
+//     否则普通商家传别人的租户 ID 就能看到别家数据。
+func effectiveTenant(r *http.Request, acc *domain.Account) string {
+	if acc.Role == domain.RoleSuperAdmin {
+		if v := strings.TrimSpace(r.URL.Query().Get("tenant_id")); v != "" {
+			return v
+		}
+		return domain.DefaultTenantID
+	}
+	return acc.TenantID
 }

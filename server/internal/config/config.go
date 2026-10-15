@@ -21,7 +21,15 @@ type Config struct {
 	OCRServiceURL string // Python OCR 微服务；为空则走内置 stub（手动保底）
 	TranslateURL  string // 既有翻译链 /api/translation；为空则走 MyMemory（本地开发）
 	MTEmail       string // MyMemory 联系邮箱（可选，提升免费配额）
+	UploadDir     string // 菜品图片落盘目录；为空则用 ./data/uploads（见 service.LocalImageStore）
+	Currency      string // 价格展示符号（AI 助手与价目用）；为空则用 ¥
 }
+
+// DefaultCurrency 是默认价格符号。
+//
+// 为什么可配：本产品服务的是「来华外国客人 + 中国商家」，绝大多数场景是人民币；
+// 但渠道客户可能在境外（华人聚集区的中餐馆），届时换成 $ / € 更自然。
+const DefaultCurrency = "¥"
 
 // env 读取环境变量，去空白后为空则回落到默认值。
 // 统一走这里是为了让「空字符串 = 用默认值」，避免误把空值当显式配置。
@@ -43,6 +51,8 @@ func env(key, def string) string {
 //   - LC_OCR_URL           → 空（走 StubOCR 手动保底）
 //   - LC_TRANSLATE_URL     → 空（走 MyMemory）
 //   - LC_MT_EMAIL          → 空（MyMemory 匿名配额，较低）
+//   - LC_UPLOAD_DIR        → ./data/uploads（菜品图片落盘目录）
+//   - LC_CURRENCY          → ¥（价格展示符号，AI 助手价目用）
 func Load() Config {
 	return Config{
 		Addr:          env("LC_ADDR", ":8080"),
@@ -53,5 +63,7 @@ func Load() Config {
 		OCRServiceURL: env("LC_OCR_URL", ""),
 		TranslateURL:  env("LC_TRANSLATE_URL", ""),
 		MTEmail:       env("LC_MT_EMAIL", ""),
+		UploadDir:     env("LC_UPLOAD_DIR", "./data/uploads"),
+		Currency:      env("LC_CURRENCY", DefaultCurrency),
 	}
 }

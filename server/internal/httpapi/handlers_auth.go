@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/domain"
 	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/idgen"
 	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/repo"
 )
@@ -84,9 +85,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	_ = s.repo.DeleteOTP(r.Context(), phone)
 
 	// 先查后建：老账号直接登录，新手机号自动注册，对前端是同一条路径。
+	//
+	// ★ 自助注册的角色是 manager（不是 tenant_admin）：新商家能立刻建店收款，
+	// 但不涉及租户级特权（邀请成员、维护翻译 Key）——那些由已有租户管理员授予。
+	// 归属默认租户：本部署先以单租户跑通，多租户切分后此策略不改业务代码。
 	acc, err := s.repo.GetAccountByPhone(r.Context(), phone)
 	if errors.Is(err, repo.ErrNotFound) {
-		acc, err = s.repo.CreateAccount(r.Context(), phone)
+		acc, err = s.repo.CreateAccount(r.Context(), domain.DefaultTenantID, "", domain.RoleManager, phone, "")
 	}
 	if err != nil {
 		fail(w, http.StatusInternalServerError, CodeInternal, "登录失败")
@@ -100,17 +105,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleMe 返回当前账号与其门店列表。
+// handleMe 返回当前账号与其可见门店列表。
 //
-// 前端启动时用它做「恢复登录态 + 拉首页数据」的一次性调用。
+// 前端启动时用它做「恢复登录态 + 拉首页数据 + 决定显示哪些后台入口」的一次性调用。
 // 若 token 有效但账号已被删，返回 UNAUTH 让前端退回登录页（而不是报 500）。
+// account 里带 role / tenant_id，前端据此显隐「后台管理」入口——
+// 权限判断以服务端为准，前端显隐只是体验优化。
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	acc, err := s.repo.GetAccountByID(r.Context(), accountID(r))
 	if err != nil {
 		fail(w, http.StatusUnauthorized, CodeUnauth, "账号不存在")
 		return
 	}
-	stores, err := s.repo.ListStoresByAccount(r.Context(), acc.ID)
+	stores, err := s.repo.ListStoresForViewer(r.Context(), acc)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, CodeInternal, "读取门店失败")
 		return

@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/domain"
 	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/idgen"
@@ -22,7 +24,7 @@ import (
 //
 // 可空列统一用 COALESCE(...,”) 折叠成空串，好处是能直接 Scan 进 string，
 // 调用方无需处理 sql.NullString。列序必须与 scanStore 的 Scan 参数严格对应。
-const storeCols = `id, account_id, name, COALESCE(addr,''), geo_lat, geo_lng,
+const storeCols = `id, account_id, tenant_id, COALESCE(org_id,''), name, COALESCE(addr,''), geo_lat, geo_lng,
 	COALESCE(wifi_ssid,''), COALESCE(wifi_pwd,''), COALESCE(business_hours,''),
 	coupon_enabled, service_tier, order_mode, slug, category_names, created_at`
 
@@ -32,14 +34,21 @@ const storeCols = `id, account_id, name, COALESCE(addr,''), geo_lat, geo_lng,
 // RETURNING：冲突时没有行返回，scanStore 会得到 ErrNotFound，于是换一个新 slug
 // 重试，最多 5 次；这样把「随机短码撞车」这种低概率事件在存储层就地化解，
 // 调用方无需关心。重试耗尽仍失败才返回错误。
-func (r *Repo) CreateStore(ctx context.Context, accountID, name, slug string) (*domain.Store, error) {
+//
+// tenantID 由创建者账号的租户决定（上层传入），门店一旦建立即固定归属，
+// 这是数据隔离的根基：之后菜品 / 评价 / 券都随门店落在这个租户里。
+//
+// ★ org_id 用空串表示「未分组」而不是 NULL：迁移里该列是 NOT NULL DEFAULT ”，
+// 与 org.parent_id 的空串约定一致（空串 = 挂父节点下）。写 NULLIF 会直接
+// 违反 NOT NULL 约束——这类错只在运行时炸，且报错信息与根因离得很远。
+func (r *Repo) CreateStore(ctx context.Context, accountID, tenantID, orgID, name, slug string) (*domain.Store, error) {
 	for attempt := 0; attempt < 5; attempt++ {
 		row := r.DB.QueryRowContext(ctx,
-			`INSERT INTO store(id, account_id, name, slug)
-			 VALUES ($1, $2, $3, $4)
+			`INSERT INTO store(id, account_id, tenant_id, org_id, name, slug)
+			 VALUES ($1, $2, $3, $4, $5, $6)
 			 ON CONFLICT (slug) DO NOTHING
 			 RETURNING `+storeCols,
-			idgen.New(), accountID, name, slug)
+			idgen.New(), accountID, tenantID, orgID, name, slug)
 
 		s, err := scanStore(row)
 		if err == nil {
@@ -89,6 +98,150 @@ func (r *Repo) ListStoresByAccount(ctx context.Context, accountID string) ([]dom
 		out = append(out, *s)
 	}
 	return out, rows.Err()
+}
+
+// ListStoresForViewer 列出「这个账号可见的门店」。
+//
+// 可见性规则（与 httpapi.requireStore 一一对应，两处必须同步改）：
+//   - super_admin：看默认租户（平台侧自己运营）的门店；跨租户查看走 ListStoresByTenant；
+//   - tenant_admin：看本租户全部门店（tenant_id 命中，不管挂谁名下）；
+//   - org_admin：看本组织及其全部子组织下的门店（品牌 / 区域作用域）；
+//   - manager / staff：只看自己名下的店（account_id 命中）。
+func (r *Repo) ListStoresForViewer(ctx context.Context, acc *domain.Account) ([]domain.Store, error) {
+	switch acc.Role {
+	case domain.RoleSuperAdmin:
+		return r.listStoresWhere(ctx, `tenant_id = $1 ORDER BY created_at`, domain.DefaultTenantID)
+	case domain.RoleTenantAdmin:
+		return r.listStoresWhere(ctx, `tenant_id = $1 ORDER BY created_at`, acc.TenantID)
+	case domain.RoleOrgAdmin:
+		ids, err := r.OrgDescendantIDs(ctx, acc.TenantID, acc.OrgID)
+		if err != nil {
+			return nil, err
+		}
+		// 没分配到组织（或组织已被删）：作用域退化为「自己的店」，绝不放大到全集团
+		if len(ids) == 0 {
+			return r.ListStoresByAccount(ctx, acc.ID)
+		}
+		return r.listStoresInOrgs(ctx, ids)
+	default: // manager / staff：只看自己的店
+		return r.ListStoresByAccount(ctx, acc.ID)
+	}
+}
+
+// CanAccessStore 判断某账号是否有权访问这家门店。
+//
+// ★ 这是商家端越权防线的唯一判据（httpapi.requireStore 调用它），
+// 与 ListStoresForViewer 的规则严格一致：列表能看到什么，点进去就该能看什么。
+// 两处若漂移，会出现「列表里没有、但接口能打开」的怪象——那既是 bug 也是信息泄露。
+func (r *Repo) CanAccessStore(ctx context.Context, acc *domain.Account, st *domain.Store) bool {
+	if st.AccountID == acc.ID {
+		return true // owner 永远能碰自己的店
+	}
+	switch acc.Role {
+	case domain.RoleSuperAdmin:
+		return st.TenantID == domain.DefaultTenantID
+	case domain.RoleTenantAdmin:
+		return st.TenantID == acc.TenantID
+	case domain.RoleOrgAdmin:
+		if st.TenantID != acc.TenantID || acc.OrgID == "" {
+			return false
+		}
+		ids, err := r.OrgDescendantIDs(ctx, acc.TenantID, acc.OrgID)
+		if err != nil {
+			return false // 查不出子树时按无权处理（拒绝优于放过）
+		}
+		for _, id := range ids {
+			if id == st.OrgID {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+// listStoresWhere 按条件列门店（供 ListStoresForViewer 的三个分支复用）。
+func (r *Repo) listStoresWhere(ctx context.Context, where string, arg any) ([]domain.Store, error) {
+	rows, err := r.DB.QueryContext(ctx,
+		`SELECT `+storeCols+` FROM store WHERE `+where, arg)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []domain.Store{}
+	for rows.Next() {
+		s, err := scanStore(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *s)
+	}
+	return out, rows.Err()
+}
+
+// listStoresInOrgs 列出落在给定组织集合里的门店（品牌区域管理员的作用域）。
+func (r *Repo) listStoresInOrgs(ctx context.Context, orgIDs []string) ([]domain.Store, error) {
+	// 动态 IN 列表：组织数是「一品牌几家门店铺」，量级很小，
+	// 用字符串拼占位符比引 ORM 更直白；参数全部走查询参数，无注入面。
+	ph := make([]string, len(orgIDs))
+	args := make([]any, len(orgIDs))
+	for i, id := range orgIDs {
+		ph[i] = "$" + strconv.Itoa(i+1)
+		args[i] = id
+	}
+	rows, err := r.DB.QueryContext(ctx,
+		`SELECT `+storeCols+` FROM store WHERE org_id IN (`+strings.Join(ph, ",")+`) ORDER BY created_at`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []domain.Store{}
+	for rows.Next() {
+		s, err := scanStore(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *s)
+	}
+	return out, rows.Err()
+}
+
+// ListStoresByTenant 列出指定租户的全部门店（超管后台用；倒序取最近的）。
+func (r *Repo) ListStoresByTenant(ctx context.Context, tenantID string, limit int) ([]domain.Store, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.DB.QueryContext(ctx,
+		`SELECT `+storeCols+` FROM store WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2`,
+		tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []domain.Store{}
+	for rows.Next() {
+		s, err := scanStore(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *s)
+	}
+	return out, rows.Err()
+}
+
+// CountStores 统计门店总数 / 指定租户门店数（tenantID 为空串时统计全平台）。
+func (r *Repo) CountStores(ctx context.Context, tenantID string) (int, error) {
+	var n int
+	if tenantID == "" {
+		err := r.DB.QueryRowContext(ctx, `SELECT count(*) FROM store`).Scan(&n)
+		return n, err
+	}
+	err := r.DB.QueryRowContext(ctx, `SELECT count(*) FROM store WHERE tenant_id = $1`, tenantID).Scan(&n)
+	return n, err
 }
 
 // StorePatch 是门店可更新字段（nil 表示不改）。
@@ -161,7 +314,7 @@ func scanStore(sc rowScanner) (*domain.Store, error) {
 		s       domain.Store
 		catJSON []byte
 	)
-	if err := sc.Scan(&s.ID, &s.AccountID, &s.Name, &s.Addr, &s.GeoLat, &s.GeoLng,
+	if err := sc.Scan(&s.ID, &s.AccountID, &s.TenantID, &s.OrgID, &s.Name, &s.Addr, &s.GeoLat, &s.GeoLng,
 		&s.WifiSSID, &s.WifiPwd, &s.BusinessHours,
 		&s.CouponEnabled, &s.ServiceTier, &s.OrderMode, &s.Slug, &catJSON, &s.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

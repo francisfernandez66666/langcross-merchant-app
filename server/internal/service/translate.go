@@ -451,12 +451,28 @@ func hasEmpty(v []string) bool {
 //   - cache：翻译记忆实现；为 nil 时跳过 TM 层（本地 / 测试场景）。
 //
 // 返回的 Translator 的 Name() 始终反映真实主引擎，便于日志与健康检查。
+//
+// 注意：本函数不启用「租户级能言 Key」。生产装配请用 NewTranslatorWithKeys，
+// 它会把主引擎换成按请求解析 Key 的 TenantPrimary。
 func NewTranslator(chainURL, email string, cache TranslationCache) Translator {
-	var primary Translator
+	return NewTranslatorWithKeys(chainURL, email, cache, nil)
+}
+
+// NewTranslatorWithKeys 是带「租户级能言 Key」的完整装配：
+// 主引擎 = TenantPrimary（有 Key 走能言，否则退既有链 / MyMemory），
+// 兜底 = 内置词典，最外层 = TM 缓存。
+//
+// vault 为 nil 时退化为 NewTranslator 的行为（本地 / 测试场景）。
+func NewTranslatorWithKeys(chainURL, email string, cache TranslationCache, vault *KeyVault) Translator {
+	var inner Translator
 	if chainURL != "" {
-		primary = NewHTTPTranslator(chainURL)
+		inner = NewHTTPTranslator(chainURL)
 	} else {
-		primary = NewMemoryTranslator(email)
+		inner = NewMemoryTranslator(email)
+	}
+	primary := inner
+	if vault != nil {
+		primary = NewTenantPrimary(vault, inner)
 	}
 	var t Translator = &FallbackTranslator{primary: primary, fallback: DictTranslator{}}
 	if cache != nil {

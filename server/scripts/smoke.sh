@@ -216,6 +216,53 @@ eq "门口码可生成" "200" \
 eq "门口码是有效 PNG" "89504e47" "$(xxd -p -l 4 /tmp/lc-smoke-qr.png)"
 
 # ─────────────────────────────────────────────────────────────
+# 客人端 AI 点菜助手 + 服务请求（本期新增，2026-10-15）
+# 知识 = 本店菜品 + 服务（RAG）；无 LLM 凭据时走确定性兜底（只陈述菜单事实）。
+# 守卫纪律：菜品名与价格不许编造；助手只「提议」动作，客人点一下才生成请求。
+# ─────────────────────────────────────────────────────────────
+
+step "21) 客人端 AI 点菜助手（RAG，无 LLM 走规则兜底）"
+AS=$(curl -s -X POST "$B/api/public/store/$SLUG/assist" -H 'Content-Type: application/json' \
+  -d '{"question":"Do you have mapo doufu?","lang":"en"}')
+ACONTENT=$(echo "$AS" | J 'd["reply"]["content"]')
+ne "助手给出回答" "$ACONTENT"
+eq "回答来源合法（llm/rule/flow/fallback）" "True" \
+  "$(echo "$AS" | J 'd["reply"]["source"] in ("llm","rule","flow","fallback")')"
+# 大小写不敏感检索：问 "mapo doufu" 应命中「麻婆豆腐」的 en 名 Mapo doufu
+# （无 LLM 时兜底直接列出菜名；有 LLM 时模型一般也会复述菜名，故软断言）
+soft "大小写不敏感命中麻婆豆腐(Mapo doufu)" \
+  "$(echo "$AS" | J '("mapo" in ((d["reply"]["content"] or "")).lower())')"
+
+step "22) 服务请求：客人发起（提议—确认边界）"
+BELL=$(curl -s -X POST "$B/api/public/store/$SLUG/requests" -H 'Content-Type: application/json' \
+  -d '{"kind":"bell","ref":"t01","lang":"en"}')
+ne "服务铃已生成 request_id" "$(echo "$BELL" | J 'd["request_id"]')"
+DISHID=$(echo "$DISHES" | J 'd["dishes"][0]["id"]')
+ADD=$(curl -s -X POST "$B/api/public/store/$SLUG/requests" -H 'Content-Type: application/json' \
+  -d "{\"kind\":\"add_dish\",\"dish_id\":\"$DISHID\",\"qty\":1,\"note\":\"extra spicy\",\"lang\":\"en\",\"ref\":\"t01\"}")
+ne "加菜已生成 request_id" "$(echo "$ADD" | J 'd["request_id"]')"
+
+step "23) 商家看服务请求待办"
+REQS=$(curl -s "$B/api/stores/$SID/requests" -H "Authorization: Bearer $TOKEN")
+ne "返回待办列表" "$(echo "$REQS" | J 'd["requests"]')"
+eq "待办数 >= 2（服务铃 + 加菜）" "True" "$(echo "$REQS" | J 'd["open_count"]>=2')"
+
+step "24) 标记加菜请求完成（客人点过才到这一步）"
+RID=$(echo "$REQS" | J 'next((r["id"] for r in d["requests"] if r["kind"]=="add_dish"), "")')
+ne "取到加菜请求 id" "$RID"
+eq "标记完成成功" "True" \
+  "$(curl -s -X POST "$B/api/stores/$SID/requests/$RID/done" -H "Authorization: Bearer $TOKEN" \
+     -H 'Content-Type: application/json' -d '{"status":"done"}' | J 'd["ok"]')"
+
+step "25) 处理后待办下降"
+REQS2=$(curl -s "$B/api/stores/$SID/requests" -H "Authorization: Bearer $TOKEN")
+eq "待办数下降为 1（仅剩服务铃）" "True" "$(echo "$REQS2" | J 'd["open_count"]==1')"
+
+step "26) 平台 AI 凭据管理（RBAC：非超管不可访问）"
+eq "普通商家访问被拒(FORBIDDEN)" "FORBIDDEN" \
+  "$(curl -s "$B/api/admin/ai-credentials" -H "Authorization: Bearer $TOKEN" | J 'd["error"]["code"]')"
+
+# ─────────────────────────────────────────────────────────────
 printf '\n\033[1m═══ 结果：%d 通过 / %d 失败 ═══\033[0m\n' "$PASS" "$FAIL"
 echo "本次测试门店：$B/s/$SLUG"
 echo "确定性离线兜底测试：bash scripts/smoke_offline.sh"

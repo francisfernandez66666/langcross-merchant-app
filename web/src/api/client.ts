@@ -11,7 +11,15 @@
  */
 
 /** 商家账号。phone 即登录标识，id 是后端主键。 */
-export type Account = { id: string; phone: string; created_at: string }
+export type Account = {
+  id: string
+  phone: string
+  /** 所属租户；空串 = 平台级（超管）。前端据此显隐「后台管理」入口。 */
+  tenant_id: string
+  /** 角色：super_admin / tenant_admin / org_admin / manager / staff。服务端为准，前端只做体验优化。 */
+  role: string
+  created_at: string
+}
 
 /**
  * 受支持的语言（来自后端注册表，前端不硬编码清单）。
@@ -93,6 +101,51 @@ export type CouponTemplate = {
   content: Record<string, unknown>
   valid_days: number
   enabled: boolean
+}
+
+/** 助手建议的一个动作（加菜 / 服务铃 / 加水）。客人端填 Key/Name/Arg，URL 留空。 */
+export type Action = {
+  key: string // add_dish / water / bell / bill
+  name: string // 按钮文案（跟随客人语言）
+  url?: string // 商家端用，客人端留空
+  arg?: string // 客人端用：add_dish 的菜品 ID
+}
+
+/** 一次 AI 点菜助手问答的产出。 */
+export type AssistReply = {
+  content: string // 正文（已是客人语言，且经守卫核对，不会编造菜品/价格）
+  actions?: Action[] // 建议动作（渲染成按钮，客人点一下才真正发起）
+  source: string // llm / rule / flow / fallback
+  model?: string // 实际使用的模型（排障用）
+}
+
+/** 客人服务请求（服务铃 / 加水 / 加菜 / 买单）。商家端待办列表的数据单元。 */
+export type GuestRequest = {
+  id: string
+  store_id: string
+  table_ref: string // 桌码 ref（t01 等），空 = 未关联桌
+  kind: 'bell' | 'water' | 'add_dish' | 'bill' | 'other'
+  payload?: { dish_id?: string; qty?: number } // add_dish 时带菜品 ID 与数量
+  lang: string // 客人界面语言（商家端据此展示对应提示）
+  note: string // 客人原话（语音转写后的文本），便于服务员理解上下文
+  status: 'open' | 'done' | 'cancelled'
+  created_at: number // Unix 秒
+  dish_name?: string // 加菜请求时附带的菜名（后端批量补，省得服务员回查）
+}
+
+/** 平台 LLM 凭据（超管维护）。Key 只返回脱敏串，明文只在 reveal 一次性返回。 */
+export type AICredential = {
+  id: string
+  /** 空串 = 平台级默认（所有租户共用）；具体租户 ID = 该租户专用。 */
+  tenant_id: string
+  name: string // 别名，便于人识别（如「平台默认 DeepSeek」）
+  base_url: string // 如 https://api.deepseek.com/v1
+  model: string // 如 deepseek-chat / gpt-4o-mini
+  key_masked: string // 脱敏展示（如 sk-****1234）
+  status: 'active' | 'disabled'
+  created_by?: string
+  created_at: number
+  updated_at: number
 }
 
 /** 单条评价。`comment_native` 是客人母语原文，`comment_zh` 是回译中文（供商家看）。 */
@@ -234,6 +287,14 @@ export const api = {
   listCoupons: (id: string) => request<{ coupons: Coupon[] }>(`/api/stores/${id}/coupons`),
   // 到店核销：用券码核销
   redeem: (id: string, code: string) => post<{ coupon: Coupon }>(`/api/stores/${id}/coupon/redeem`, { code }),
+  // 商家看服务请求（默认只看待办）；status 可传 open/done/cancelled，limit 控制条数
+  listGuestRequests: (id: string, status = '', limit = 50) =>
+    request<{ requests: GuestRequest[]; open_count: number }>(
+      `/api/stores/${id}/requests?status=${encodeURIComponent(status)}&limit=${limit}`,
+    ),
+  // 标记请求完成 / 取消（status: done / cancelled）
+  doneGuestRequest: (id: string, rid: string, status: 'done' | 'cancelled') =>
+    post<{ ok: boolean; status: string }>(`/api/stores/${id}/requests/${rid}/done`, { status }),
 
   // ── 客人端（公开，无需登录） ──
   // 拉门店公开页数据；ref 是来源码，需 encodeURIComponent 防注入/截断
@@ -249,6 +310,54 @@ export const api = {
     post<{ rating: Rating; coupon: Coupon | null; coupon_gift?: string }>(
       `/api/public/store/${slug}/rating`,
       body,
+    ),
+
+  // ── 客人端 AI 点菜助手（语音转文字后走同一个接口） ──
+  // 提问一次；lang 决定助手用哪种语言作答（也是 RAG 取菜名的语种）。
+  // 多轮靠服务端 cookie（lc_guest）隔离，前端无需管会话 ID。
+  assist: (slug: string, body: { question: string; lang: string }) =>
+    post<{ reply: AssistReply; lang: string; store_id: string }>(
+      `/api/public/store/${slug}/assist`,
+      body,
+    ),
+  // 结束当前助手会话（清流程 + 历史）。
+  clearAssist: (slug: string) => post<{ ok: boolean }>(`/api/public/store/${slug}/assist/clear`, {}),
+  // 发起一条服务请求（助手所有动作的落点）：加菜 / 加水 / 服务铃 / 买单。
+  // kind 必填；add_dish 需带 dish_id 与 qty；note 是客人原话（语音转写）。
+  createGuestRequest: (
+    slug: string,
+    body: { kind: string; dish_id?: string; qty?: number; note?: string; lang?: string; ref?: string },
+  ) => post<{ ok: boolean; request_id: string; message: string }>(`/api/public/store/${slug}/requests`, body),
+
+  // ── 商家端 AI 经营助手（需登录） ──
+  // 一次问答；store_id 可空（空 = 平台级问答，只答产品怎么用）。
+  assistChat: (store_id: string, question: string) =>
+    post<{ reply: AssistReply; store_id: string; assist_llm: boolean }>('/api/assist/chat', { store_id, question }),
+  // 清空对话（「重新开始」）。
+  clearAssistChat: (store_id: string) => post<{ ok: boolean }>('/api/assist/clear', { store_id }),
+
+  // ── 平台 AI 凭据管理（超管；tenant_admin 仅只读脱敏列表） ──
+  // 列出凭据（脱敏）；can_write 标识当前账号是否可写（仅超管为 true）。
+  listAICredentials: () =>
+    request<{ credentials: AICredential[]; can_write: boolean }>('/api/admin/ai-credentials'),
+  // 新增凭据（密文落库）；明文只在本次响应里返回一次。
+  createAICredential: (body: { name: string; tenant_id: string; base_url: string; model: string; api_key: string }) =>
+    post<{ credential: AICredential; note: string }>('/api/admin/ai-credentials', body),
+  // 启用 / 停用凭据。
+  setAICredentialStatus: (id: string, status: 'active' | 'disabled') =>
+    post<{ ok: boolean; status: string }>(`/api/admin/ai-credentials/${id}/status`, { status }),
+  // 轮换 API Key（新密文覆盖，旧的立即失效）；返回新的脱敏串。
+  rotateAICredential: (id: string, api_key: string) =>
+    post<{ ok: boolean; key_masked: string }>(`/api/admin/ai-credentials/${id}/rotate`, { api_key }),
+  // 查看 API Key 明文（一次性返回 + 落审计）。
+  revealAICredential: (id: string) => post<{ ok: boolean; api_key: string }>(`/api/admin/ai-credentials/${id}/reveal`, {}),
+  // 删除凭据。
+  deleteAICredential: (id: string) => request<{ ok: boolean }>(`/api/admin/ai-credentials/${id}`, { method: 'DELETE' }),
+  // 试译一次，验证凭据可用（地址 / 模型 / Key 是否都对）。
+  testAICredential: (id: string) =>
+    post<{ ok: boolean; source: string; model: string; content: string; note: string }>(
+      `/api/admin/ai-credentials/${id}/test`,
+      {},
     ),
 
   // ── 多语种能力 ──

@@ -8,19 +8,31 @@ package domain
 import "time"
 
 // Account 商家主账号。注册只收手机号。
+//
+// 租户与角色（见 tenant.go）让同一个进程服务多个客户：租户是隔离边界，
+// 角色决定能干什么。TenantID 为空串 = 平台级账号（超管），不属于任何租户。
 type Account struct {
-	ID        string    `json:"id"`         // 账号 ID（idgen 生成的随机十六进制串）
-	Phone     string    `json:"phone"`      // 手机号，全局唯一，是注册与登录的凭据
-	CreatedAt time.Time `json:"created_at"` // 注册时间
+	ID          string    `json:"id"`                     // 账号 ID（idgen 生成的随机十六进制串）
+	Phone       string    `json:"phone"`                  // 手机号，全局唯一，是注册与登录的凭据
+	TenantID    string    `json:"tenant_id"`              // 所属租户；空串 = 平台级（超管）
+	Role        string    `json:"role"`                   // super_admin / tenant_admin / org_admin / manager / staff
+	OrgID       string    `json:"org_id,omitempty"`       // 所属组织（品牌 / 区域）；空 = 未分配
+	Status      string    `json:"status"`                 // active / disabled（停用后禁止登录）
+	DisplayName string    `json:"display_name,omitempty"` // 显示名（后台成员列表展示）
+	CreatedAt   time.Time `json:"created_at"`             // 注册时间
 }
 
 // Store 门店。slug 定死为 /s/{slug}，物料印刷后不可变。
 //
 // 门店是租户边界：菜品、原文稿、评价、券、埋点均以 ID 归属。slug 是印在门口码 /
 // 桌贴二维码里的短链标识，一旦生成不可修改（改了旧码就扫不开）。
+// TenantID 从 Owner 账号继承，用于「租户管理员看本租户全部门店」。
+// OrgID 圈定「哪个品牌 / 区域」：品牌区域管理员只看得到本组织（含子组织）的门店。
 type Store struct {
 	ID            string   `json:"id"`                       // 门店 ID
 	AccountID     string   `json:"account_id"`               // 所属账号，一个账号可开多店
+	TenantID      string   `json:"tenant_id"`                // 所属租户（数据隔离边界）
+	OrgID         string   `json:"org_id,omitempty"`         // 所属组织（品牌 / 区域）
 	Name          string   `json:"name"`                     // 店名
 	Addr          string   `json:"addr,omitempty"`           // 地址
 	GeoLat        *float64 `json:"geo_lat,omitempty"`        // 纬度（可选）
@@ -55,6 +67,7 @@ type Dish struct {
 	SortOrder   int               `json:"sort_order"`            // 展示顺序（等于导入时的切片下标）
 	SoldOut     bool              `json:"sold_out"`              // 是否售罄
 	Remaining   *int              `json:"remaining,omitempty"`   // 每日剩余（唯一动态字段）
+	ImageURL    string            `json:"image_url,omitempty"`   // 菜品图片 URL（空=无图，客人端渲染占位块）
 }
 
 // DraftItem 原文确认稿里的一道菜（原始语言）。

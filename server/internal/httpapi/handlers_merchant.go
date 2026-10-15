@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -21,14 +22,37 @@ import (
 	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/service"
 )
 
-// requireStore 校验门店存在且属于当前账号。
+// requireStore 校验门店存在且当前账号有权访问。
 //
 // 返回 (nil, false) 时错误响应已经写好，调用方直接 return 即可。
 // 这是商家端唯一的越权防线：路径里的 {id} 完全由客户端控制，
 // 若不校验归属，任何人拿到一个门店 ID 就能读到别家的菜单、评价与经营数据。
+//
 // 三种失败刻意分成三档：门店不存在 → 404，读库失败 → 500，不是你的 → 403。
+//
+// ★ 访问规则由 repo.CanAccessStore 单点判定（与 ListStoresForViewer 同一套规则）：
+//   - 门店 owner：任何角色都能碰自己的店；
+//   - org_admin：本组织及其子组织下的门店；
+//   - tenant_admin：本租户全部门店；
+//   - super_admin：默认租户（平台自营）的门店；跨租户查看走超管接口。
 func (s *Server) requireStore(w http.ResponseWriter, r *http.Request) (*domain.Store, bool) {
-	st, err := s.repo.GetStoreByID(r.Context(), r.PathValue("id"))
+	return s.authorizeStore(w, r, r.PathValue("id"))
+}
+
+// authorizeStore 按显式 ID 校验门店（存在 + 有权访问）。
+//
+// 与 requireStore 的差别只在于 ID 来源：requireStore 取路径参数
+// （/api/stores/{id}/... 形态），本函数取请求体字段。
+// ★ 为什么要拆出来：AI 经营助手的 store_id 在 JSON body 里，
+// 若硬套 requireStore，PathValue("id") 会拿到空串，报错变成「门店不存在」——
+// 一个与真实原因（参数位置不同）毫无关系的提示，排障时会被带偏。
+func (s *Server) authorizeStore(w http.ResponseWriter, r *http.Request, id string) (*domain.Store, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		fail(w, http.StatusBadRequest, CodeValidation, "缺少门店 ID")
+		return nil, false
+	}
+	st, err := s.repo.GetStoreByID(r.Context(), id)
 	if errors.Is(err, repo.ErrNotFound) {
 		fail(w, http.StatusNotFound, CodeNotFound, "门店不存在")
 		return nil, false
@@ -37,7 +61,7 @@ func (s *Server) requireStore(w http.ResponseWriter, r *http.Request) (*domain.S
 		fail(w, http.StatusInternalServerError, CodeInternal, "读取门店失败")
 		return nil, false
 	}
-	if st.AccountID != accountID(r) {
+	if !s.repo.CanAccessStore(r.Context(), currentAccount(r), st) {
 		fail(w, http.StatusForbidden, CodeForbidden, "无权访问该门店")
 		return nil, false
 	}
@@ -72,10 +96,12 @@ func nilIfEmpty(v string) *string {
 	return &v
 }
 
-// handleListStores 列出当前账号的门店。
-// 查询直接按 accountID 过滤，天然隔离了其它商家的数据。
+// handleListStores 列出当前账号可见的门店。
+//
+// manager / staff 只看自己名下的店；tenant_admin 看本租户全部门店；
+// 超管看默认租户（平台自营）的门店。见 repo.ListStoresForViewer。
 func (s *Server) handleListStores(w http.ResponseWriter, r *http.Request) {
-	stores, err := s.repo.ListStoresByAccount(r.Context(), accountID(r))
+	stores, err := s.repo.ListStoresForViewer(r.Context(), currentAccount(r))
 	if err != nil {
 		fail(w, http.StatusInternalServerError, CodeInternal, "读取门店失败")
 		return
@@ -89,8 +115,15 @@ func (s *Server) handleListStores(w http.ResponseWriter, r *http.Request) {
 // slug、券模板与二维码链接全部自动生成。刻意不让商家做任何配置决策——
 // 决策越多，从注册到「门口贴上码」的转化越低。
 //
+// ★ 角色门禁：只有 manager 及以上能建店（staff 是来核销券的，不该能开新店）。
+// ★ 租户继承：新门店归属创建者所在租户，这是数据隔离的起点。
+//
 // slug 由 idgen.Slug() 生成且此后不可变：它被印在物料上，改一次全部作废。
 func (s *Server) handleCreateStore(w http.ResponseWriter, r *http.Request) {
+	acc, allowed := s.requireRole(w, r, domain.RoleLevel(domain.RoleManager))
+	if !allowed {
+		return
+	}
 	var req struct {
 		Name     string `json:"name"`
 		Addr     string `json:"addr"`
@@ -102,7 +135,7 @@ func (s *Server) handleCreateStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st, err := s.repo.CreateStore(r.Context(), accountID(r), strings.TrimSpace(req.Name), idgen.Slug())
+	st, err := s.repo.CreateStore(r.Context(), acc.ID, acc.TenantID, acc.OrgID, strings.TrimSpace(req.Name), idgen.Slug())
 	if err != nil {
 		fail(w, http.StatusInternalServerError, CodeInternal, "创建门店失败")
 		return
@@ -548,6 +581,101 @@ func (s *Server) handlePatchDish(w http.ResponseWriter, r *http.Request) {
 	if err := s.repo.UpdateDishStatus(r.Context(), st.ID, r.PathValue("dishId"), req.SoldOut, req.Remaining); err != nil {
 		fail(w, http.StatusNotFound, CodeNotFound, "菜品不存在")
 		return
+	}
+	ok(w, map[string]any{"ok": true})
+}
+
+// handleUploadDishImage 上传菜品图片（multipart，字段名 image，≤5MB）。
+//
+// 为什么走 multipart 而不是 base64 JSON：图片大了之后 base64 会让体积膨胀 1/3，
+// 且 multipart 天然流式，配合 http.MaxBytesReader 可以在读取阶段就截断超大文件，
+// 不必先把整个恶意文件读进内存。
+//
+// 流程：requireStore → 取文件 → 落盘（service 负责限流与魔数校验）→ 写库 →
+// 删旧文件。删旧文件放在写库成功之后，避免「库没改成、图先没了」的中间态。
+// 旧文件删除失败不影响主流程（孤儿文件可由运维清理），故只记日志不阻断。
+func (s *Server) handleUploadDishImage(w http.ResponseWriter, r *http.Request) {
+	st, ok2 := s.requireStore(w, r)
+	if !ok2 {
+		return
+	}
+	dishID := r.PathValue("dishId")
+
+	// 在读 body 之前先设上限：超过上限的请求在读文件阶段就会被截断，
+	// multipart 解析随后会报错，等价于拒绝（而不是把 5GB 读进内存再判断）。
+	r.Body = http.MaxBytesReader(w, r.Body, service.MaxImageBytes+64<<10) // +64KB 给 multipart 头部留余量
+	fh, _, err := r.FormFile("image")
+	if err != nil {
+		fail(w, http.StatusBadRequest, CodeValidation, "请上传图片文件")
+		return
+	}
+	defer func() { _ = fh.Close() }()
+
+	old, _ := s.repo.GetDishImage(r.Context(), st.ID, dishID)
+
+	url, err := s.images.Save(fh)
+	if err != nil {
+		// 区分两种失败给不同人话：超限让人去压图，格式不对让人换个图
+		switch {
+		case errors.Is(err, service.ErrTooLarge):
+			fail(w, http.StatusBadRequest, CodeValidation, "图片不能超过 5MB，请压缩后重试")
+		case errors.Is(err, service.ErrBadType):
+			fail(w, http.StatusBadRequest, CodeValidation, "仅支持 PNG / JPEG / WebP / GIF 图片")
+		default:
+			log.Printf("保存菜品图片失败 dish=%s: %v", dishID, err)
+			fail(w, http.StatusInternalServerError, CodeInternal, "图片保存失败")
+		}
+		return
+	}
+
+	// 写库失败要顺手删掉刚落的文件，否则又会多一个孤儿文件
+	if err := s.repo.SetDishImage(r.Context(), st.ID, dishID, url); err != nil {
+		if derr := s.images.Delete(url); derr != nil {
+			log.Printf("回滚菜品图片失败 url=%s: %v", url, derr)
+		}
+		if errors.Is(err, repo.ErrNotFound) {
+			fail(w, http.StatusNotFound, CodeNotFound, "菜品不存在")
+			return
+		}
+		fail(w, http.StatusInternalServerError, CodeInternal, "保存图片失败")
+		return
+	}
+
+	// 旧文件与新旧不同才删：重复上传同一地址时 url 必然不同（文件名随机），
+	// 因此这里做一次不等式保护只是防御，实际总会成立。
+	if old != "" && old != url {
+		if err := s.images.Delete(old); err != nil {
+			log.Printf("删除旧菜品图片失败 url=%s: %v", old, err)
+		}
+	}
+	ok(w, map[string]any{"ok": true, "image_url": url})
+}
+
+// handleDeleteDishImage 删除菜品图片（文件与库记录一并清理）。
+//
+// 先删库还是先删文件：先删文件。若先删库而删文件失败，前端会认为已无图，
+// 但文件还占着磁盘且失去引用；反过来最坏只是「库里还有一条指向已删文件的 URL」，
+// 客人端 <img> 加载失败会自然显示占位块。两种错法都选影响面小的那个。
+func (s *Server) handleDeleteDishImage(w http.ResponseWriter, r *http.Request) {
+	st, ok2 := s.requireStore(w, r)
+	if !ok2 {
+		return
+	}
+	dishID := r.PathValue("dishId")
+
+	old, _ := s.repo.GetDishImage(r.Context(), st.ID, dishID)
+	if err := s.repo.SetDishImage(r.Context(), st.ID, dishID, ""); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			fail(w, http.StatusNotFound, CodeNotFound, "菜品不存在")
+			return
+		}
+		fail(w, http.StatusInternalServerError, CodeInternal, "删除图片失败")
+		return
+	}
+	if old != "" {
+		if err := s.images.Delete(old); err != nil {
+			log.Printf("删除菜品图片文件失败 url=%s: %v", old, err)
+		}
 	}
 	ok(w, map[string]any{"ok": true})
 }

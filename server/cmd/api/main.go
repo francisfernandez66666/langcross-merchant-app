@@ -18,7 +18,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/assist"
 	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/config"
+	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/crypt"
 	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/db"
 	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/httpapi"
 	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/repo"
@@ -43,13 +45,45 @@ func main() {
 	if err := db.Migrate(ctx, database); err != nil {
 		log.Fatalf("迁移失败: %v", err)
 	}
+	// 默认租户兜底：迁移 0005 已建，这里再确保一次（应对手工建库 / 迁移被跳过）。
+	if err := repo.New(database).EnsureDefaultTenant(ctx); err != nil {
+		log.Printf("确保默认租户失败（不致命）: %v", err)
+	}
 
 	// 装配依赖：repo 同时充当翻译记忆（TM）存储，因此直接传给 NewTranslator。
 	// OCR / 翻译都按配置选择实现，未配置时自动走降级版本，保证零配置可跑。
 	r := repo.New(database)
 	ocr := service.NewOCR(cfg.OCRServiceURL)
-	tr := service.NewTranslator(cfg.TranslateURL, cfg.MTEmail, r)
-	srv := httpapi.NewServer(cfg, r, ocr, tr)
+
+	// 翻译凭据箱：能言 API Key 由超管在后台维护、密文落库（AES-256-GCM，
+	// 密钥由 LC_SECRET 派生）。建不起来（密钥过短 / 缺失）时不阻断启动——
+	// 只是「Key 管理不可用」，翻译照常走次级引擎（既有链 / MyMemory / 词典）。
+	var vault *service.KeyVault
+	if cipher, cerr := crypt.NewCipher(cfg.Secret); cerr != nil {
+		log.Printf("翻译 Key 加密未启用（%v）：后台将无法维护能言 API Key", cerr)
+	} else {
+		vault = service.NewKeyVault(cipher, r)
+	}
+	tr := service.NewTranslatorWithKeys(cfg.TranslateURL, cfg.MTEmail, r, vault)
+
+	// 菜品图片存储：默认落本地目录（LC_UPLOAD_DIR），由 GET /api/uploads/ 对外提供。
+	images := service.NewLocalImageStore(cfg.UploadDir)
+
+	// ── AI 经营助手 ──
+	// 装配三件事：
+	//   1. 加密器：与翻译 Key 复用同一把 LC_SECRET 派生的 cipher（密文存储）；
+	//   2. 凭据箱：按租户解析当前生效的 LLM 凭据（配了才调模型，没配走规则兜底）；
+	//   3. 引擎：流程状态落 assist_session 表，多实例部署下多轮流程不丢。
+	// 任一步失败都不阻断启动——只是助手退化成规则模式。
+	var aiVault *service.AICredVault
+	if cipher, cerr := crypt.NewCipher(cfg.Secret); cerr != nil {
+		log.Printf("AI 凭据加密未启用（%v）：经营助手将只能使用内置规则", cerr)
+	} else {
+		aiVault = service.NewAICredVault(cipher, r)
+	}
+	engine := assist.NewWithStore(repo.NewAssistSessionStore(database))
+
+	srv := httpapi.NewServer(cfg, r, ocr, tr, images, vault).WithAssist(engine, aiVault)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
