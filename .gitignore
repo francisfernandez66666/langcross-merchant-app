@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+bin/
+
+# 环境变量（勿提交）
+.env
+.env.local
+.env.*.local
+
+# Go
+*.test
+*.out
+/vendor/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 日志
+*.log

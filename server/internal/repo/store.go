@@ -1,0 +1,128 @@
+package repo
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+
+	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/domain"
+	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/idgen"
+)
+
+const storeCols = `id, account_id, name, COALESCE(addr,''), geo_lat, geo_lng,
+	COALESCE(wifi_ssid,''), COALESCE(wifi_pwd,''), COALESCE(business_hours,''),
+	coupon_enabled, service_tier, order_mode, slug, created_at`
+
+// CreateStore 新建门店。slug 冲突时自动重试。
+func (r *Repo) CreateStore(ctx context.Context, accountID, name, slug string) (*domain.Store, error) {
+	for attempt := 0; attempt < 5; attempt++ {
+		s := &domain.Store{
+			ID:            idgen.New(),
+			AccountID:     accountID,
+			Name:          name,
+			Slug:          slug,
+			CouponEnabled: true,
+			ServiceTier:   "pure",
+			OrderMode:     "assist",
+		}
+		err := r.DB.QueryRowContext(ctx,
+			`INSERT INTO store(id, account_id, name, slug)
+			 VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (slug) DO NOTHING
+			 RETURNING `+storeCols,
+			s.ID, s.AccountID, s.Name, s.Slug).Scan(
+			&s.ID, &s.AccountID, &s.Name, &s.Addr, &s.GeoLat, &s.GeoLng,
+			&s.WifiSSID, &s.WifiPwd, &s.BusinessHours,
+			&s.CouponEnabled, &s.ServiceTier, &s.OrderMode, &s.Slug, &s.CreatedAt)
+		if err == nil {
+			return s, nil
+		}
+		if errors.Is(err, sql.ErrNoRows) { // slug 撞了，换一个再来
+			slug = idgen.Slug()
+			continue
+		}
+		return nil, fmt.Errorf("create store: %w", err)
+	}
+	return nil, fmt.Errorf("create store: slug collision retries exhausted")
+}
+
+// GetStoreBySlug 按 slug 查门店（客人端入口）。
+func (r *Repo) GetStoreBySlug(ctx context.Context, slug string) (*domain.Store, error) {
+	return r.scanStore(r.DB.QueryRowContext(ctx,
+		`SELECT `+storeCols+` FROM store WHERE slug = $1`, slug))
+}
+
+// GetStoreByID 按 ID 查门店。
+func (r *Repo) GetStoreByID(ctx context.Context, id string) (*domain.Store, error) {
+	return r.scanStore(r.DB.QueryRowContext(ctx,
+		`SELECT `+storeCols+` FROM store WHERE id = $1`, id))
+}
+
+// ListStoresByAccount 列出账号下所有门店。
+func (r *Repo) ListStoresByAccount(ctx context.Context, accountID string) ([]domain.Store, error) {
+	rows, err := r.DB.QueryContext(ctx,
+		`SELECT `+storeCols+` FROM store WHERE account_id = $1 ORDER BY created_at`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.Store
+	for rows.Next() {
+		var s domain.Store
+		if err := rows.Scan(&s.ID, &s.AccountID, &s.Name, &s.Addr, &s.GeoLat, &s.GeoLng,
+			&s.WifiSSID, &s.WifiPwd, &s.BusinessHours,
+			&s.CouponEnabled, &s.ServiceTier, &s.OrderMode, &s.Slug, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// StorePatch 是门店可更新字段（nil 表示不改）。
+type StorePatch struct {
+	Name          *string
+	Addr          *string
+	WifiSSID      *string
+	WifiPwd       *string
+	BusinessHours *string
+	CouponEnabled *bool
+	ServiceTier   *string
+	OrderMode     *string
+}
+
+// UpdateStore 局部更新门店。
+func (r *Repo) UpdateStore(ctx context.Context, id string, p StorePatch) (*domain.Store, error) {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE store SET
+		   name           = COALESCE($2, name),
+		   addr           = COALESCE($3, addr),
+		   wifi_ssid      = COALESCE($4, wifi_ssid),
+		   wifi_pwd       = COALESCE($5, wifi_pwd),
+		   business_hours = COALESCE($6, business_hours),
+		   coupon_enabled = COALESCE($7, coupon_enabled),
+		   service_tier   = COALESCE($8, service_tier),
+		   order_mode     = COALESCE($9, order_mode)
+		 WHERE id = $1`,
+		id, p.Name, p.Addr, p.WifiSSID, p.WifiPwd, p.BusinessHours,
+		p.CouponEnabled, p.ServiceTier, p.OrderMode)
+	if err != nil {
+		return nil, fmt.Errorf("update store: %w", err)
+	}
+	return r.GetStoreByID(ctx, id)
+}
+
+func (r *Repo) scanStore(row *sql.Row) (*domain.Store, error) {
+	var s domain.Store
+	if err := row.Scan(&s.ID, &s.AccountID, &s.Name, &s.Addr, &s.GeoLat, &s.GeoLng,
+		&s.WifiSSID, &s.WifiPwd, &s.BusinessHours,
+		&s.CouponEnabled, &s.ServiceTier, &s.OrderMode, &s.Slug, &s.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &s, nil
+}
