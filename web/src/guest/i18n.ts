@@ -1,21 +1,45 @@
 /**
- * 客人端多语词典。
+ * 客人端多语词典（**界面骨架文案**）。
  *
- * 设计原则：
- * 1. **目标语言优先**——页面所有文案都随客人选的语言切换，不留中文残影。
- * 2. 只收 UI 骨架文案；菜名/分类名走服务端翻译链（真实数据，不硬编码）。
- * 3. 问店员短语保留「目标语言 + 中文」双语——客人看得懂，店员也看得懂，
- *    这才是「语言不通不再成为门槛」的实际用法。
+ * ─────────────────────────────────────────────────────────────
+ * ★ 界面词典 vs 后端语种注册表：两套东西，分工不同，别混
+ * ─────────────────────────────────────────────────────────────
+ *   - **后端语种注册表**（`GET /api/translation/langs`）是「有哪些语言」的
+ *     唯一真值。前端**绝不硬编码语种清单**——新增语种 = 后端登记一行，前端零改动。
+ *   - **本文件的 UI 词典**是「这些固定按钮/提示该怎么说」的翻译表，每种语言**需要一行**。
+ *     它无法由后端下发，因为它是产品自己的界面文案，不是门店数据。
+ *   - 二者通过**短码**（`zh`/`en`/…）对齐；注册表里出现的新语种若本表没有列，
+ *     由 `t()` 的回落链兜住，页面不会崩、不会空白。
  *
- * 新增语种：在每张表补一列即可；缺列时自动回落 en（见 t()）。
+ * ─────────────────────────────────────────────────────────────
+ * 设计原则
+ * ─────────────────────────────────────────────────────────────
+ *   1. **目标语言优先**——页面所有文案都随客人选的语言切换，不留中文残影（渲染纪律 L1）。
+ *   2. 只收 UI 骨架文案；菜名/分类名走服务端翻译链（真实数据，不硬编码）。
+ *   3. 问店员短语保留「目标语言 + 中文」双语——客人看得懂，店员也看得懂，
+ *      这才是「语言不通不再成为门槛」的实际用法。
+ *
+ * ★ 回落链：`t(key, lang)` = `lang → en → zh → key`。
+ *   即：目标语言缺失退英语，英语再缺失退中文，连词条都不存在则直接显示 key 本身
+ *   （便于开发期一眼看出漏配，而不是静默显示空白）。
+ *   新增语种：在每张表补一列即可；缺列时自动走上述回落。
  */
 
+/** 前端界面文案支持的语种短码。与后端注册表的 code 对齐（后端为准，此处仅作类型约束）。 */
 export type LangCode = 'zh' | 'en' | 'ja' | 'ko' | 'th' | 'fr' | 'es' | 'de' | 'pt' | 'vi'
 
+/** 词典一行：一个 key 对应各语种的译法。要求每个语种都齐全，缺列靠 `t()` 回落。 */
 type Row = Record<LangCode, string>
 
-/** 页面骨架文案。 */
+/**
+ * 页面骨架文案表。
+ *
+ * 结构：`UI[业务key][语种短码] = 译文`。
+ * 调用方式：`t('menu', lang)`，**不要直接读 UI**，否则会绕过回落链。
+ * 每个 key 的注释说明它出现在页面的哪个位置，方便改文案时判断影响面。
+ */
 const UI: Record<string, Row> = {
+  // 页面标题后缀 / 空分类区标题：浏览器标签页、分享预览也会用到
   menu: {
     zh: '菜单',
     en: 'Menu',
@@ -28,6 +52,7 @@ const UI: Record<string, Row> = {
     pt: 'Cardápio',
     vi: 'Thực đơn',
   },
+  // 招牌推荐位的区块标题（仅当菜品 ≥3 时出现）
   signature: {
     zh: '本店招牌',
     en: 'House Favorites',
@@ -40,6 +65,7 @@ const UI: Record<string, Row> = {
     pt: 'Destaques da casa',
     vi: 'Món đặc sắc',
   },
+  // 头部副标题 + 底部主按钮：评价领券（只在开了券的店显示）
   rate: {
     zh: '评价领券',
     en: 'Rate & get a coupon',
@@ -52,6 +78,7 @@ const UI: Record<string, Row> = {
     pt: 'Avalie e ganhe um cupom',
     vi: 'Đánh giá nhận ưu đãi',
   },
+  // 底部「问店员」按钮 + 问店员卡标题
   ask: {
     zh: '需要帮忙？',
     en: 'Need help?',
@@ -64,6 +91,7 @@ const UI: Record<string, Row> = {
     pt: 'Precisa de ajuda?',
     vi: 'Cần giúp đỡ?',
   },
+  // 菜品状态标：售罄
   soldOut: {
     zh: '售罄',
     en: 'Sold out',
@@ -76,6 +104,7 @@ const UI: Record<string, Row> = {
     pt: 'Esgotado',
     vi: 'Hết hàng',
   },
+  // 菜品状态标：剩余份数前缀（后接数字，如「余 3」/「3 left」）
   left: {
     zh: '余',
     en: 'left',
@@ -88,6 +117,7 @@ const UI: Record<string, Row> = {
     pt: 'restantes',
     vi: 'còn',
   },
+  // 加载态整屏提示
   loading: {
     zh: '加载中…',
     en: 'Loading…',
@@ -100,6 +130,7 @@ const UI: Record<string, Row> = {
     pt: 'Carregando…',
     vi: 'Đang tải…',
   },
+  // WiFi 行的标签（德语用 WLAN，属正常差异）
   wifi: {
     zh: 'WiFi',
     en: 'WiFi',
@@ -112,6 +143,7 @@ const UI: Record<string, Row> = {
     pt: 'Wi-Fi',
     vi: 'WiFi',
   },
+  // 各弹层右上角关闭按钮（含 aria-label）
   close: {
     zh: '关闭',
     en: 'Close',
@@ -124,6 +156,7 @@ const UI: Record<string, Row> = {
     pt: 'Fechar',
     vi: 'Đóng',
   },
+  // 券卡底部「完成」按钮
   done: {
     zh: '完成',
     en: 'Done',
@@ -136,6 +169,7 @@ const UI: Record<string, Row> = {
     pt: 'Concluir',
     vi: 'Xong',
   },
+  // 券卡标题：感谢评价
   couponTitle: {
     zh: '感谢你的评价！',
     en: 'Thanks for your review!',
@@ -148,6 +182,7 @@ const UI: Record<string, Row> = {
     pt: 'Obrigado pela sua avaliação!',
     vi: 'Cảm ơn bạn đã đánh giá!',
   },
+  // 券卡提示：截图保存、到店出示
   couponTip: {
     zh: '截图保存，到店出示即可核销',
     en: 'Screenshot it and show it at the store',
@@ -160,6 +195,7 @@ const UI: Record<string, Row> = {
     pt: 'Tire um print e mostre na loja',
     vi: 'Chụp màn hình và xuất trình tại quán',
   },
+  // 券卡有效期前缀（后接本地化日期）
   validUntil: {
     zh: '有效期至',
     en: 'Valid until',
@@ -172,6 +208,7 @@ const UI: Record<string, Row> = {
     pt: 'Válido até',
     vi: 'Có hiệu lực đến',
   },
+  // 评价弹层标题
   rateTitle: {
     zh: '这次体验怎么样？',
     en: 'How was your visit?',
@@ -184,6 +221,7 @@ const UI: Record<string, Row> = {
     pt: 'Como foi sua experiência?',
     vi: 'Trải nghiệm lần này thế nào?',
   },
+  // 评价维度一：菜品
   q1: {
     zh: '菜品',
     en: 'Food',
@@ -196,6 +234,7 @@ const UI: Record<string, Row> = {
     pt: 'Comida',
     vi: 'Món ăn',
   },
+  // 评价维度二：服务
   q2: {
     zh: '服务',
     en: 'Service',
@@ -208,6 +247,7 @@ const UI: Record<string, Row> = {
     pt: 'Atendimento',
     vi: 'Phục vụ',
   },
+  // 评价维度三：会再来吗（复购意愿，商家最关心的指标）
   q3: {
     zh: '还会再来吗',
     en: 'Would you come back?',
@@ -220,6 +260,7 @@ const UI: Record<string, Row> = {
     pt: 'Você voltaria?',
     vi: 'Bạn có quay lại không?',
   },
+  // 评价弹层文字评论框的占位提示
   commentPh: {
     zh: '想说点什么？（可选）',
     en: 'Anything to add? (optional)',
@@ -232,6 +273,7 @@ const UI: Record<string, Row> = {
     pt: 'Algo a acrescentar? (opcional)',
     vi: 'Muốn nói thêm? (không bắt buộc)',
   },
+  // 评价弹层主按钮
   submit: {
     zh: '提交并领取优惠券',
     en: 'Submit & get coupon',
@@ -244,6 +286,7 @@ const UI: Record<string, Row> = {
     pt: 'Enviar e receber o cupom',
     vi: 'Gửi và nhận ưu đãi',
   },
+  // 评价提交中按钮态
   submitting: {
     zh: '提交中…',
     en: 'Submitting…',
@@ -256,7 +299,8 @@ const UI: Record<string, Row> = {
     pt: 'Enviando…',
     vi: 'Đang gửi…',
   },
-  // ★ 关键：译文缺失时的诚实标注，绝不让原文冒充目标语言
+  // ★ 关键：译文缺失时的诚实标注，绝不让原文冒充目标语言（渲染纪律 L3/L4）。
+  // 显示在主标题旁的小标，提醒客人「这行其实是原文，不是你的语言」。
   pending: {
     zh: '原文',
     en: 'Not translated',
@@ -269,6 +313,7 @@ const UI: Record<string, Row> = {
     pt: 'Não traduzido',
     vi: 'Chưa dịch',
   },
+  // 译文缺失时，替换「原文小字辅助行」的提示语（此时主标题已是原文，再重复原文是冗余）
   pendingHint: {
     zh: '暂无译文，以下为原文',
     en: 'No translation yet — showing the original',
@@ -281,6 +326,7 @@ const UI: Record<string, Row> = {
     pt: 'Ainda sem tradução — exibindo o original',
     vi: 'Chưa có bản dịch — đang hiển thị nguyên văn',
   },
+  // 非中文时说明「这是机器翻译」，同时兜底提示可问店员（L5 纪律）
   machineNote: {
     zh: '菜单为机器翻译，如有疑问请向店员确认',
     en: 'Machine-translated menu. Please ask our staff if anything is unclear.',
@@ -293,6 +339,7 @@ const UI: Record<string, Row> = {
     pt: 'Cardápio traduzido automaticamente. Em caso de dúvida, pergunte à equipe.',
     vi: 'Thực đơn dịch tự động. Nếu chưa rõ, vui lòng hỏi nhân viên.',
   },
+  // 语言选择弹层标题（也用作头部语言按钮的 aria-label）
   chooseLang: {
     zh: '选择语言',
     en: 'Choose language',
@@ -305,6 +352,7 @@ const UI: Record<string, Row> = {
     pt: 'Escolher idioma',
     vi: 'Chọn ngôn ngữ',
   },
+  // 门店拉取失败 / 不存在时的兜底标题
   unavailable: {
     zh: '门店不可用',
     en: 'Store unavailable',
@@ -317,6 +365,7 @@ const UI: Record<string, Row> = {
     pt: 'Loja indisponível',
     vi: 'Cửa hàng không khả dụng',
   },
+  // 门店尚无菜品时的占位提示
   emptyMenu: {
     zh: '菜单正在准备中。',
     en: 'The menu is being prepared.',
@@ -329,6 +378,7 @@ const UI: Record<string, Row> = {
     pt: 'O cardápio está sendo preparado.',
     vi: 'Thực đơn đang được chuẩn bị.',
   },
+  // 问店员卡引导语：请把下面的话给店员看
   helpTitle: {
     zh: '请向店员出示',
     en: 'Show this to our staff',
@@ -343,24 +393,41 @@ const UI: Record<string, Row> = {
   },
 }
 
-/** 取文案；缺该语种时回落英语，再回落中文，最后回落 key 本身。 */
+/**
+ * 取界面文案。
+ *
+ * ★ 回落链：`lang → en → zh → key`。
+ *   - `lang` 命中：直接用目标语言（正常路径）。
+ *   - 该语种缺列：退到英语（覆盖面最广）。
+ *   - 英语也缺：退到中文（产品母语，保证不空白）。
+ *   - key 根本不在表里：直接返回 key 字符串本身，便于开发期发现漏配，
+ *     而不是静默返回空串导致页面出现莫名的空白按钮。
+ *
+ * 注意：`row[lang as LangCode]` 用断言是因为运行时 `lang` 可能来自后端注册表，
+ * 含本表未收录的语种；断言不改变运行时行为，缺失时自然走 `??` 回落。
+ */
 export function t(key: string, lang: string): string {
   const row = UI[key]
   if (!row) return key
   return row[lang as LangCode] ?? row.en ?? row.zh ?? key
 }
 
-/** 语言选择器上的一行显示名（优先母语写法）。 */
+/** 语言选择器上的一行显示名：优先母语写法，缺失则用大写短码（如 JA）。 */
 export function langLabel(lang: { code: string; native: string }): string {
   return lang.native || lang.code.toUpperCase()
 }
 
 /**
  * 问店员常用短语：目标语言在上（客人看得懂），中文在下（店员看得懂）。
- * 这是无网也能用的兜底——不依赖 WiFi、不依赖翻译服务。
+ * 这是无网也能用的兜底——不依赖 WiFi、不依赖翻译服务，故硬编码在前端。
+ * `zh` 字段既是中文原文，也充当短语的唯一标识（列表 key 与兜底文案）。
  */
 export type Phrase = { zh: string; texts: Record<LangCode, string> }
 
+/**
+ * 问店员短语清单。覆盖点单/忌口/过敏/结账/洗手间/打包等高频场景。
+ * 加短语只需往数组追加一项；加语种则在每个 `texts` 里补一列（缺列回落 en）。
+ */
 export const PHRASES: Phrase[] = [
   {
     zh: '请给我菜单',
@@ -454,7 +521,10 @@ export const PHRASES: Phrase[] = [
   },
 ]
 
-/** 取短语的目标语言写法（缺列回落英语）。 */
+/**
+ * 取短语的目标语言写法：`lang → en → zh`（最后必落到中文原文，保证非空）。
+ * 与 `t()` 的回落链同源，但终点是短语自身的中文原文，而非 key。
+ */
 export function phraseText(p: Phrase, lang: string): string {
   return p.texts[lang as LangCode] ?? p.texts.en ?? p.zh
 }

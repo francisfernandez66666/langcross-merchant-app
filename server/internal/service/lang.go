@@ -1,3 +1,10 @@
+// Package service 承载对外部能力的抽象（OCR / 翻译 / 二维码），
+// 使本地无外部服务时也能跑通，生产只需换实现。
+//
+// ── lang.go：受支持语种注册表 ───────────────────────────────
+//
+// 本文件是全产品唯一的「语种真相来源」。架构与语种无关：
+// 新增一门语言 = 在 SupportedLangs 登记一行（+ 翻译引擎支持），业务代码零改动。
 package service
 
 // Lang 是一个受支持的语言。
@@ -9,10 +16,19 @@ type Lang struct {
 }
 
 // SourceLang 是原文语种（本期只做中文菜单，架构上语种无关）。
+// 全局唯一：菜单原文、OCR 识别结果、评价回译的目标语种都以此为基准。
 const SourceLang = "zh"
 
 // SupportedLangs 是产品支持的语言。
 // 架构与语种无关：新增一门语言只需在此登记 + 引擎支持即可，业务代码零改动。
+//
+// ★ 顺序即前端语言选择器的展示顺序（/api/public/langs 直接返回本切片），
+// 当前按「Tier 1 → 2 → 3」排列，请勿随意调整，否则会打乱用户的语种选择习惯。
+//
+// Tier 字段的含义（前端会据此提示用户）：
+//   - 1 = 承诺质量：zh / en，产品对外承诺的必达语种；
+//   - 2 = 较好：ja / ko / th，翻译质量较好；
+//   - 3 = 尽力而为：fr / es / de / pt / vi，能翻但质量不作承诺。
 var SupportedLangs = []Lang{
 	{Code: "zh", Native: "中文", NameZh: "中文", Tier: 1},
 	{Code: "en", Native: "English", NameZh: "英语", Tier: 1},
@@ -27,6 +43,8 @@ var SupportedLangs = []Lang{
 }
 
 // IsSupportedLang 判断语种是否受支持。
+// 用于清洗外部传入的目标语种（见 httpapi.normalizeTargets），
+// 避免把未登记的语种透传给翻译引擎。
 func IsSupportedLang(code string) bool {
 	for _, l := range SupportedLangs {
 		if l.Code == code {

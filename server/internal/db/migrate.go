@@ -1,3 +1,10 @@
+// Package db 负责数据库连接与迁移。
+//
+// ── migrate.go：内嵌式自动迁移 ──────────────────────────────
+//
+// 迁移文件由 migrations 包以 go:embed 打进二进制（见 migrations/embed.go），
+// 因此部署时只需一个可执行文件，无需随附 migrations 目录。
+// 启动时按 schema_migrations 表判断哪些迁移尚未执行，只跑增量部分。
 package db
 
 import (
@@ -12,6 +19,18 @@ import (
 
 // Migrate 按文件名升序执行尚未应用的 .sql 迁移，并记录到 schema_migrations。
 // 迁移文件自带 BEGIN/COMMIT，此处整段执行。
+//
+// 执行流程：
+//  1. 建 schema_migrations 表（若不存在）——版本账本；
+//  2. 读出已应用的版本集合；
+//  3. 从内嵌 FS 取全部 *.sql，按文件名升序排序（因此迁移文件需以
+//     0001_、0002_ 之类的序号前缀命名，保证顺序即依赖顺序）；
+//  4. 跳过已应用的，逐个执行并记账。
+//
+// ★ 约定：迁移文件内部自带 BEGIN/COMMIT，本函数整段 ExecContext 执行，
+// 因此不额外包事务；也意味着单个迁移要么整体成功、要么整体失败。
+// 注意「执行成功」与「记账成功」是两步，若在两步之间崩溃可能重复执行，
+// 所以迁移语句本身应写成幂等（IF NOT EXISTS 之类）。
 func Migrate(ctx context.Context, d *sql.DB) error {
 	if _, err := d.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version    TEXT PRIMARY KEY,
