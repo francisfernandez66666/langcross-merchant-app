@@ -50,6 +50,9 @@
 | POST | `/api/stores/{id}/translate` | 多语化：`{targets:["en","ja",...]}` → 只翻 `selected` 的菜，结果写 `dish.names_json`；**同批顺带把分类名多语化**写 `store.category_names`。返回 `{dishes, translated_count, targets, categories, engine}` |
 | GET | `/api/stores/{id}/dishes` | 菜单（每道菜含 `name_zh` + `names`） |
 | PATCH | `/api/stores/{id}/dishes/{dishId}` | 更新售罄 / 每日剩余 |
+| POST | `/api/stores/{id}/dishes/{dishId}/image` | 上传 / 替换菜品图片（multipart 字段 `image`，≤5MB，PNG/JPEG/WebP/GIF）；返回 `{image_url}`，旧图自动删除 |
+| DELETE | `/api/stores/{id}/dishes/{dishId}/image` | 删除菜品图片（幂等） |
+| GET | `/api/uploads/{file}` | 图片静态服务（文件名 32 位随机 hex，不可枚举即不可见） |
 | GET | `/api/stores/{id}/ratings` | 评价列表（含客人母语原文 + 中文译文 `comment_zh`） |
 | GET | `/api/stores/{id}/insights` | 经营洞察：`{scans, coupons_issued, coupons_redeemed, rating, scope_note}`；★ 只算「用我们工具的外国客数据」 |
 | GET | `/api/stores/{id}/coupon-template` | 券模板（`content` 是多语 map） |
@@ -120,6 +123,58 @@ LLM 凭据由平台超管统一维护、密文落库（`LC_SECRET` 派生的 AES
 | DELETE | `/api/admin/ai-credentials/{id}` | 删除凭据 |
 | POST | `/api/admin/ai-credentials/{id}/test` | 试译一次，验证地址 / 模型 / Key 是否可用；返回 `{source, model, content, note}` |
 
+## 平台管理（租户 / 账号 / 翻译 Key / 审计）
+
+对齐 langcross 平台的租户模型。所有接口先认证（`withAuth`），角色判定在 handler 内：
+未登录 401、等级不够 403，错误码可区分。
+
+**角色**：`super_admin`（平台超管）> `tenant_admin`（租户管理员）> `org_admin` > `manager` > `staff`。
+超管天然通过租户管理员门禁；`effectiveTenant` 收口「谁能看谁的数据」——超管可用 `?tenant_id=` 指定租户，租户管理员永远只能作用于自己租户。
+
+### 租户（★ 仅超管）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/admin/tenants` | 租户列表（附带门店数 / 账号数） |
+| POST | `/api/admin/tenants` | 新建 `{code, name, expires_at?, perms?}`；code 是 3-32 位小写字母/数字/中划线且不可重复 |
+| PATCH | `/api/admin/tenants/{id}` | 改 `{name?, status?（active/disabled/expired）, expires_at?（null=永久）, perms?}` |
+| GET | `/api/admin/tenants/{id}/stores` | 该租户名下的门店（超管跨租户只读查看） |
+
+### 账号与角色（超管 / 租户管理员，各自作用域）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/admin/accounts` | 账号列表（超管看全部；租户管理员看本租户） |
+| POST | `/api/admin/accounts` | 新建 `{phone, role, display_name?}`；★ 不能创建同级或更高级角色；手机号已存在则就地改角色（`created:false`） |
+| PATCH | `/api/admin/accounts/{id}/role` | 改角色；不能改自己、不能授予同级或更高级 |
+| PATCH | `/api/admin/accounts/{id}/status` | 停用 / 启用 `{status: active\|disabled}`；不能停用同级或更高级成员 |
+| GET | `/api/admin/my-tenant` | 我所属的租户 + 我的角色 |
+| GET | `/api/admin/stats` | 平台总数（租户 / 账号 / 门店 / 翻译 Key），★ 仅超管 |
+
+### 翻译 Key（★ 超管专属增删改查，租户一律不接触）
+
+能言开放平台的凭据，密文落库（与 LLM 凭据复用同一把 `LC_SECRET` 派生的 AES-256-GCM）。
+**租户管理员连列表都不可见**——Key 是平台成本凭据，对租户没有实际用途（他既不能用也不能改），
+索性不看，少一个信息暴露面。翻译链按租户解析 Key 的逻辑在服务端（`TenantPrimary`），不经过本组接口。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/admin/translate-keys` | Key 列表（脱敏 `key_masked`）+ `active_key_id`（当前生效的那把） |
+| POST | `/api/admin/translate-keys` | 新增 `{name, key, mode?, daily_limit?}`；明文只在本次响应说明里承诺「此后只能查看明文复制」 |
+| POST | `/api/admin/translate-keys/{id}/reveal` | 查看明文（一次性返回 + 落审计） |
+| POST | `/api/admin/translate-keys/{id}/rotate` | 轮换 `{key}`（新密文覆盖，旧的立即失效） |
+| POST | `/api/admin/translate-keys/{id}/status` | 启停 `{status: active\|disabled}`；停用后翻译链回落，最多 30s 缓存 TTL 生效 |
+| POST | `/api/admin/translate-keys/{id}/test` | 试译 `{text, to}`：真翻一句验证可用性，顺带带回余额；失败返回 `{ok:false, error}` |
+| DELETE | `/api/admin/translate-keys/{id}` | 删除 |
+
+### 审计
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/admin/audit` | 最近 200 条审计（超管全量；租户管理员后端按租户过滤）。动作含建租户、改角色、维护 Key、查看明文等 |
+
+超管端到端验证：`bash server/scripts/smoke_admin.sh`（需 psql 提权，见脚本头注释）。
+
 ## 工具
 
 | 方法 | 路径 | 说明 |
@@ -136,6 +191,7 @@ LLM 凭据由平台超管统一维护、密文落库（`LC_SECRET` 派生的 AES
 
 | 脚本 | 覆盖 |
 |---|---|
-| `server/scripts/smoke.sh` | 26 步、64 条断言。含语种注册表、一次 5 语种翻译、分类名多语化、注册前多语预览、券面本地化、评分契约、跨店核销拒绝、双码 PNG 魔数、客人端 AI 点菜助手（RAG 检索）、服务请求全链路（发起/待办/标记完成）、AI 凭据 RBAC 守卫 |
+| `server/scripts/smoke.sh` | 28 步、69 条断言。含语种注册表、一次 5 语种翻译、分类名多语化、注册前多语预览、券面本地化、评分契约、跨店核销拒绝、双码 PNG 魔数、客人端 AI 点菜助手（RAG 检索）、服务请求全链路（发起/待办/标记完成）、AI 凭据 RBAC 守卫、翻译 Key RBAC 守卫（普通商家连列表都 403）、菜品图片（上传/公开访问 PNG 魔数/删除 404） |
+| `server/scripts/smoke_admin.sh` | 23 条断言。超管正例：psql 提权 → 租户 CRUD、账号管理、翻译 Key（超管专属，脱敏+启停）、AI 凭据（can_write）、经理 vs 超管权限对照 403、审计留痕 |
 | `server/scripts/smoke_offline.sh` | 29 条断言。翻译链指向不可达地址 → 确定性验证内置词典兜底与「绝不编造」纪律 |
 | `web/scripts/guest-render-check.mjs` | 39 条断言。真开无头浏览器，验证客人端渲染纪律与语言切换 |
