@@ -47,16 +47,38 @@ echo "── 7) 确认原文（P3，一次确认即生效）"
 curl -s -X POST "$B/api/stores/$SID/draft/confirm" -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{}' | J '"  confirmed draft="+d["draft_id"]'
 
-echo "── 8) 多语化（P4，只翻勾选的菜）"
+echo "── 7.5) 语种注册表（前端语种选择器的唯一真值）"
+curl -s "$B/api/translation/langs" | J '"  source="+d["source"]+"  engine="+d["engine"]+"  语种="+str(len(d["langs"]))+"  ["+", ".join(l["code"] for l in d["langs"])+"]"'
+
+echo "── 8) 多语化（P4，只翻勾选的菜；一次多语种）"
 curl -s -X POST "$B/api/stores/$SID/translate" -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -d '{}' | J '"  translated_count="+str(d["translated_count"])'
+  -H 'Content-Type: application/json' \
+  -d '{"targets":["en","ja","ko","fr","th"]}' \
+  | J '"  translated_count="+str(d["translated_count"])+"  targets="+str(d["targets"])'
 curl -s "$B/api/stores/$SID/dishes" -H "Authorization: Bearer $TOKEN" | python3 -c '
 import sys,json
-for x in json.load(sys.stdin)["dishes"]:
-    print("   ", x["name_zh"], "→", x.get("name_en") or "(未命中)", "¥", x.get("price"))'
+ds=json.load(sys.stdin)["dishes"]
+codes=["en","ja","ko","fr","th"]
+for x in ds:
+    ns=x.get("names") or {}
+    hit=" ".join(c+"="+(ns.get(c) or "-") for c in codes)
+    print("   ", x["name_zh"], "¥", x.get("price"), "|", hit)'
+
+echo "── 8.5) 注册前多语预览（不落库、不需要登录）"
+curl -s -X POST "$B/api/public/translate-preview" -H 'Content-Type: application/json' -d '{
+  "from":"zh","targets":["en","ja","ko"],
+  "items":[{"name":"宫保鸡丁","price":38,"category":"热菜","selected":true},
+           {"name":"米饭","price":3,"category":"主食","selected":true}]}' \
+  | J '"  菜名="+d["items"][0]["names"].get("en","-")+"  分类="+str(d["categories"].get("en"))'
 
 echo "── 9) 客人端门店页（公开，无需登录）"
-curl -s "$B/api/public/store/$SLUG?ref=t01" | J '"  store="+d["store"]["name"]+"  dishes="+str(len(d["dishes"]))+"  coupon_enabled="+str(d["store"]["coupon_enabled"])'
+curl -s "$B/api/public/store/$SLUG?ref=t01" | python3 -c '
+import sys,json
+d=json.load(sys.stdin)
+print("   store=%s  dishes=%d  coupon_enabled=%s" % (d["store"]["name"], len(d["dishes"]), d["store"]["coupon_enabled"]))
+cn=d["store"].get("category_names") or {}
+print("   分类多语种:", json.dumps(cn.get("en"), ensure_ascii=False))
+print("   首道菜多语种:", json.dumps(d["dishes"][0].get("names"), ensure_ascii=False) if d["dishes"] else "-")'
 
 echo "── 10) 客人提交三维度评价 → 自动发券（发券免费）"
 RATED=$(curl -s -X POST "$B/api/public/store/$SLUG/rating" -H 'Content-Type: application/json' -d '{

@@ -7,6 +7,7 @@ import {
   type Coupon,
   type Dish,
   type Insights,
+  type Lang,
   type Store,
   type StoreLinks,
 } from '../api/client'
@@ -231,10 +232,14 @@ function Overview({ store }: { store: Store }) {
   )
 }
 
-/* ── 菜单：售罄 / 每日剩余 ───────────────────────────────── */
+/* ── 菜单：多语种覆盖 / 补翻 / 售罄 ──────────────────────── */
 function MenuTab({ store }: { store: Store }) {
   const [dishes, setDishes] = useState<Dish[]>([])
+  const [langs, setLangs] = useState<Lang[]>([])
   const [msg, setMsg] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [pickOpen, setPickOpen] = useState(false)
+  const [picked, setPicked] = useState<string[]>([])
 
   const load = useCallback(() => {
     api.listDishes(store.id).then((d) => setDishes(d.dishes ?? [])).catch((e: Error) => setMsg(e.message))
@@ -242,7 +247,17 @@ function MenuTab({ store }: { store: Store }) {
 
   useEffect(() => {
     load()
+    api.langs().then((d) => setLangs(d.langs ?? [])).catch(() => undefined)
   }, [load])
+
+  const targets = langs.filter((l) => l.code !== 'zh')
+
+  /** 某语种的覆盖率：有译文的菜 / 总菜数。 */
+  const coverage = (code: string) => {
+    if (dishes.length === 0) return 0
+    const hit = dishes.filter((d) => d.names?.[code]).length
+    return Math.round((hit / dishes.length) * 100)
+  }
 
   const toggle = async (d: Dish) => {
     try {
@@ -253,43 +268,123 @@ function MenuTab({ store }: { store: Store }) {
     }
   }
 
+  const runTranslate = async () => {
+    if (picked.length === 0) return
+    setBusy(true)
+    setMsg('')
+    try {
+      const r = await api.translate(store.id, picked)
+      setMsg(`已生成 ${picked.length} 个语种，新增译文 ${r.translated_count} 条。`)
+      setPickOpen(false)
+      setPicked([])
+      load()
+    } catch (e) {
+      setMsg((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="lc-stack">
-      <h1>菜单</h1>
+      <div className="lc-row lc-row--between">
+        <h1 style={{ margin: 0 }}>菜单</h1>
+        <button className="lc-btn lc-btn--sm" onClick={() => setPickOpen((v) => !v)}>
+          补充语种
+        </button>
+      </div>
       <p className="lc-muted">「每日剩余」是唯一需要每天维护的字段；不维护就不显示，不会报错。</p>
-      {msg && <div className="lc-alert lc-alert--err">{msg}</div>}
+
+      {/* 语种覆盖一览：一眼看出哪些语言还没翻 */}
+      <div className="lc-card">
+        <div className="lc-label">语种覆盖（{dishes.length} 道菜）</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+          {targets.map((l) => {
+            const pct = coverage(l.code)
+            return (
+              <span
+                key={l.code}
+                className={`lc-badge ${pct === 100 ? 'lc-badge--ok' : pct === 0 ? '' : 'lc-badge--warn'}`}
+                title={`${l.native} · ${l.name_zh}`}
+              >
+                {l.native} {pct}%
+              </span>
+            )
+          })}
+        </div>
+      </div>
+
+      {pickOpen && (
+        <div className="lc-card">
+          <div className="lc-label">选择要补充生成的语种（已有译文不会重复翻，省配额）</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginBottom: 12 }}>
+            {targets.map((l) => {
+              const on = picked.includes(l.code)
+              return (
+                <button
+                  key={l.code}
+                  className="lc-btn lc-btn--sm"
+                  style={{
+                    borderColor: on ? 'var(--lc-accent)' : undefined,
+                    background: on ? 'var(--lc-accent)' : undefined,
+                    color: on ? '#fff' : undefined,
+                  }}
+                  onClick={() => setPicked(on ? picked.filter((c) => c !== l.code) : [...picked, l.code])}
+                >
+                  {l.native}
+                </button>
+              )
+            })}
+          </div>
+          <button className="lc-btn lc-btn--primary lc-btn--sm" disabled={busy || picked.length === 0} onClick={runTranslate}>
+            {busy ? '生成中…' : `生成所选 ${picked.length} 个语种`}
+          </button>
+        </div>
+      )}
+
+      {msg && <div className="lc-alert lc-alert--info">{msg}</div>}
+
       <div className="lc-card" style={{ padding: 0 }}>
         <table className="lc-table">
           <thead>
             <tr>
-              <th>中文</th>
+              <th>中文原文</th>
               <th>English</th>
               <th>分类</th>
               <th style={{ textAlign: 'right' }}>价格</th>
+              <th style={{ textAlign: 'right' }}>已译语种</th>
               <th style={{ textAlign: 'right' }}>状态</th>
               <th />
             </tr>
           </thead>
           <tbody>
-            {dishes.map((d) => (
-              <tr key={d.id}>
-                <td>{d.name_zh}</td>
-                <td>{d.name_en || <span className="lc-dim">未命中</span>}</td>
-                <td>{d.category || '-'}</td>
-                <td style={{ textAlign: 'right' }}>{d.price != null ? `¥${d.price}` : '-'}</td>
-                <td style={{ textAlign: 'right' }}>
-                  {d.sold_out ? <span className="lc-badge">售罄</span> : <span className="lc-badge lc-badge--ok">在售</span>}
-                </td>
-                <td style={{ textAlign: 'right' }}>
-                  <button className="lc-btn lc-btn--sm lc-btn--ghost" onClick={() => toggle(d)}>
-                    {d.sold_out ? '恢复' : '售罄'}
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {dishes.map((d) => {
+              const have = Object.entries(d.names ?? {}).filter(([, v]) => v)
+              return (
+                <tr key={d.id}>
+                  <td>{d.name_zh}</td>
+                  <td>{d.names?.en || <span className="lc-dim">未命中</span>}</td>
+                  <td>{d.category || '-'}</td>
+                  <td style={{ textAlign: 'right' }}>{d.price != null ? `¥${d.price}` : '-'}</td>
+                  <td style={{ textAlign: 'right' }}>
+                    <span className="lc-dim" title={have.map(([k]) => k).join(', ')}>
+                      {have.length}/{targets.length}
+                    </span>
+                  </td>
+                  <td style={{ textAlign: 'right' }}>
+                    {d.sold_out ? <span className="lc-badge">售罄</span> : <span className="lc-badge lc-badge--ok">在售</span>}
+                  </td>
+                  <td style={{ textAlign: 'right' }}>
+                    <button className="lc-btn lc-btn--sm lc-btn--ghost" onClick={() => toggle(d)}>
+                      {d.sold_out ? '恢复' : '售罄'}
+                    </button>
+                  </td>
+                </tr>
+              )
+            })}
             {dishes.length === 0 && (
               <tr>
-                <td colSpan={6} className="lc-dim" style={{ padding: 20, textAlign: 'center' }}>
+                <td colSpan={7} className="lc-dim" style={{ padding: 20, textAlign: 'center' }}>
                   暂无菜品，去引导流上传菜单
                 </td>
               </tr>

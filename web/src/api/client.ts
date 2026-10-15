@@ -2,6 +2,20 @@
 
 export type Account = { id: string; phone: string; created_at: string }
 
+/** 受支持的语言。tier 是质量分层：1 承诺质量 / 2 较好 / 3 尽力而为。 */
+export type Lang = {
+  code: string
+  native: string
+  name_zh: string
+  tier: 1 | 2 | 3
+}
+
+export type LangsResponse = {
+  source: string
+  langs: Lang[]
+  engine: string
+}
+
 export type Store = {
   id: string
   account_id: string
@@ -13,12 +27,16 @@ export type Store = {
   coupon_enabled: boolean
   service_tier: 'pure' | 'service'
   order_mode: 'assist' | 'replace'
+  /** 分类名多语种表：{lang: {原文分类: 译文}} */
+  category_names?: Record<string, Record<string, string>>
 }
 
 export type Dish = {
   id: string
   name_zh: string
   name_en?: string
+  /** 多语种菜名：{"en":"...","ja":"..."}；name_zh 始终是原文真值 */
+  names?: Record<string, string>
   description?: string
   price?: number
   category?: string
@@ -33,6 +51,8 @@ export type DraftItem = {
   category?: string
   selected: boolean
   name_en?: string
+  /** 多语种预览结果 */
+  names?: Record<string, string>
 }
 
 export type Coupon = {
@@ -143,7 +163,11 @@ export const api = {
   saveDraft: (id: string, items: DraftItem[]) =>
     post<{ draft: { id: string } }>(`/api/stores/${id}/draft`, { lang: 'zh', items }),
   confirmDraft: (id: string) => post<{ draft_id: string }>(`/api/stores/${id}/draft/confirm`, {}),
-  translate: (id: string) => post<{ dishes: Dish[]; translated_count: number }>(`/api/stores/${id}/translate`, {}),
+  translate: (id: string, targets: string[] = []) =>
+    post<{ dishes: Dish[]; translated_count: number; targets: string[]; category_names?: Record<string, Record<string, string>> }>(
+      `/api/stores/${id}/translate`,
+      { targets },
+    ),
   listDishes: (id: string) => request<{ dishes: Dish[] }>(`/api/stores/${id}/dishes`),
   patchDish: (id: string, dishId: string, body: { sold_out: boolean; remaining?: number }) =>
     patch<{ ok: boolean }>(`/api/stores/${id}/dishes/${dishId}`, body),
@@ -159,11 +183,24 @@ export const api = {
   submitRating: (
     slug: string,
     body: { ref: string; score_dish: number; score_service: number; score_return: number; comment?: string; lang?: string },
-  ) => post<{ rating: Rating; coupon: Coupon | null }>(`/api/public/store/${slug}/rating`, body),
+  ) =>
+    post<{ rating: Rating; coupon: Coupon | null; coupon_gift?: string }>(
+      `/api/public/store/${slug}/rating`,
+      body,
+    ),
+
+  // ── 多语种能力 ──
+  langs: () => request<LangsResponse>('/api/translation/langs'),
 
   // ── P4 注册前多语预览 ──
-  previewTranslate: (items: DraftItem[]) =>
-    post<{ items: DraftItem[] }>('/api/public/translate-preview', { items, from: 'zh', to: 'en' }),
+  previewTranslate: (items: DraftItem[], targets: string[]) =>
+    post<{
+      items: DraftItem[]
+      categories: Record<string, Record<string, string>>
+      source_cats: string[]
+      targets: string[]
+      engine: string
+    }>('/api/public/translate-preview', { items, from: 'zh', targets }),
 
   // ── 工具 ──
   ocr: (imageBase64: string) =>

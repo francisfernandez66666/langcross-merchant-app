@@ -1,72 +1,27 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
-import { api, type Coupon, type Dish, type Store } from '../api/client'
+import { api, type Coupon, type Dish, type Lang, type Store } from '../api/client'
+import { PHRASES, langLabel, phraseText, t } from './i18n'
 
-type Lang = 'zh' | 'en'
-
-const T: Record<Lang, Record<string, string>> = {
-  zh: {
-    signature: '本店招牌',
-    menu: '菜单',
-    rate: '评价本次体验 · 领优惠券',
-    ask: '需要帮忙？',
-    soldOut: '售罄',
-    left: '余',
-    loading: '加载中…',
-    wifi: 'WiFi',
-    close: '关闭',
-    couponTitle: '感谢你的评价！',
-    couponTip: '截图保存，到店出示即可核销',
-    validUntil: '有效期至',
-    noCoupon: '已收到你的评价，谢谢！',
-    done: '完成',
-    rateTitle: '这次体验怎么样？',
-    q1: '菜品',
-    q2: '服务',
-    q3: '还会再来吗',
-    commentPh: '想说点什么？（可选）',
-    submit: '提交并领取优惠券',
-    submitting: '提交中…',
-    helpTitle: '请向店员出示',
-  },
-  en: {
-    signature: 'House Favorites',
-    menu: 'Menu',
-    rate: 'Rate your visit · Get a coupon',
-    ask: 'Need help?',
-    soldOut: 'Sold out',
-    left: 'left',
-    loading: 'Loading…',
-    wifi: 'WiFi',
-    close: 'Close',
-    couponTitle: 'Thanks for your review!',
-    couponTip: 'Screenshot & show it at the store',
-    validUntil: 'Valid until',
-    noCoupon: 'Your review has been received. Thank you!',
-    done: 'Done',
-    rateTitle: 'How was your visit?',
-    q1: 'Food',
-    q2: 'Service',
-    q3: 'Would you come back?',
-    commentPh: 'Anything to add? (optional)',
-    submit: 'Submit & get coupon',
-    submitting: 'Submitting…',
-    helpTitle: 'Please show this to our staff',
-  },
+/** 浏览器语言 → 受支持语种（en-US → en）。 */
+function detectLang(codes: string[]): string {
+  const list = navigator.languages?.length ? navigator.languages : [navigator.language]
+  for (const raw of list) {
+    const base = String(raw || '').toLowerCase().split('-')[0]
+    if (codes.includes(base)) return base
+  }
+  return codes.includes('en') ? 'en' : (codes[0] ?? 'en')
 }
 
-/** 问店员常用短语（无网时的兜底也是这张卡）。 */
-const PHRASES: { zh: string; en: string }[] = [
-  { zh: '请给我菜单', en: 'Could I see the menu?' },
-  { zh: '请不要放辣', en: 'Not spicy, please.' },
-  { zh: '我对花生过敏', en: 'I am allergic to peanuts.' },
-  { zh: '请不要放猪肉', en: 'No pork, please.' },
-  { zh: '请帮我结账', en: 'The bill, please.' },
-  { zh: '请打包', en: 'Could you pack this to go?' },
-  { zh: '洗手间在哪里？', en: 'Where is the restroom?' },
-  { zh: '可以刷卡吗？', en: 'Do you take credit cards?' },
-]
+const LANG_KEY = 'lc_guest_lang'
 
+/**
+ * 客人端门店页。
+ *
+ * ★ 语言纪律（本轮修复的核心）：
+ *   页面主标题永远是**目标语言**；原文只作为小字辅助。
+ *   译文缺失时显示原文并明确标注「未翻译」，绝不让中文冒充英文大字。
+ */
 export default function StorePage() {
   const { slug = '' } = useParams()
   const [sp] = useSearchParams()
@@ -75,13 +30,33 @@ export default function StorePage() {
   const [store, setStore] = useState<Store | null>(null)
   const [dishes, setDishes] = useState<Dish[]>([])
   const [couponContent, setCouponContent] = useState<Record<string, unknown>>({})
-  const [lang, setLang] = useState<Lang>('en')
+  const [langs, setLangs] = useState<Lang[]>([])
+  // 语种优先级：URL ?lang= > 上次选择 > 浏览器语言
+  const [lang, setLang] = useState<string>(() => sp.get('lang') || localStorage.getItem(LANG_KEY) || 'en')
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
   const [rateOpen, setRateOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
+  const [langOpen, setLangOpen] = useState(false)
   const [coupon, setCoupon] = useState<Coupon | null>(null)
+  const [couponGift, setCouponGift] = useState('')
   const [couponChecked, setCouponChecked] = useState(false)
+
+  // 语种注册表（后端是唯一真值，前端不硬编码语种清单）
+  useEffect(() => {
+    api
+      .langs()
+      .then((d) => {
+        setLangs(d.langs ?? [])
+        const codes = (d.langs ?? []).map((l) => l.code)
+        setLang((cur) => (codes.includes(cur) ? cur : detectLang(codes)))
+      })
+      .catch(() => undefined)
+  }, [])
+
+  useEffect(() => {
+    localStorage.setItem(LANG_KEY, lang)
+  }, [lang])
 
   useEffect(() => {
     setLoading(true)
@@ -96,10 +71,13 @@ export default function StorePage() {
       .finally(() => setLoading(false))
   }, [slug, ref])
 
+  const current = langs.find((l) => l.code === lang)
+  const catNames = store?.category_names?.[lang] ?? {}
+
   const groups = useMemo(() => {
     const m = new Map<string, Dish[]>()
     for (const d of dishes) {
-      const k = d.category || '其他'
+      const k = d.category || ''
       const arr = m.get(k) ?? []
       arr.push(d)
       m.set(k, arr)
@@ -107,106 +85,138 @@ export default function StorePage() {
     return Array.from(m.entries())
   }, [dishes])
 
-  const t = (k: string) => T[lang][k] ?? k
-  const name = (d: Dish) => (lang === 'en' && d.name_en ? d.name_en : d.name_zh)
-  const secondary = (d: Dish) => (lang === 'en' ? d.name_zh : d.name_en ?? '')
+  /** 菜名渲染：返回主标题 + 是否命中译文。 */
+  const title = (d: Dish): { text: string; ok: boolean } => {
+    if (lang === 'zh') return { text: d.name_zh, ok: true }
+    const hit = d.names?.[lang]
+    return hit ? { text: hit, ok: true } : { text: d.name_zh, ok: false }
+  }
 
-  if (loading) return <div className="guest warm lc-center">{T[lang].loading}</div>
+  if (loading) {
+    return (
+      <div className="guest warm gx-center" data-lang={lang}>
+        <div className="gx-spinner" />
+        <div className="lc-muted" style={{ marginTop: 14 }}>
+          {t('loading', lang)}
+        </div>
+      </div>
+    )
+  }
   if (err || !store) {
     return (
-      <div className="guest warm lc-center">
-        <h2>门店不可用</h2>
-        <p className="lc-muted">{err || '未找到该门店'}</p>
+      <div className="guest warm gx-center" data-lang={lang}>
+        <h2>{t('unavailable', lang)}</h2>
+        <p className="lc-muted">{err || '404'}</p>
       </div>
     )
   }
 
+  const signature = dishes.slice(0, 3)
+
   return (
-    <div className="guest warm">
-      <header className="guest-hero">
-        <div className="lc-row lc-row--between">
-          <div>
-            <h1 style={{ marginBottom: 2 }}>{store.name}</h1>
-            <div className="lc-dim">
-              {store.coupon_enabled ? (lang === 'en' ? 'Rate & get a coupon' : '评价即领券') : ''}
-            </div>
+    <div className="guest warm gx" data-lang={lang}>
+      <header className="gx-hero">
+        <div className="gx-hero-row">
+          <div className="gx-brand">
+            <h1 className="gx-store">{store.name}</h1>
+            {store.coupon_enabled && <div className="gx-sub">{t('rate', lang)}</div>}
           </div>
-          <div className="guest-lang">
-            <button className={lang === 'en' ? 'is-on' : ''} onClick={() => setLang('en')}>
-              EN
-            </button>
-            <button className={lang === 'zh' ? 'is-on' : ''} onClick={() => setLang('zh')}>
-              中文
-            </button>
-          </div>
+          <button className="gx-langbtn" onClick={() => setLangOpen(true)} aria-label={t('chooseLang', lang)}>
+            <span className="gx-globe" aria-hidden>
+              ◍
+            </span>
+            <span className="gx-langbtn-txt">{current ? langLabel(current) : lang.toUpperCase()}</span>
+            <span className="gx-caret" aria-hidden>
+              ⌄
+            </span>
+          </button>
         </div>
 
         {/* ★ 兜底不依赖 WiFi：未填 WiFi 时整行不渲染 */}
         {store.wifi_ssid && (
-          <div className="lc-dim" style={{ marginTop: 10 }}>
-            {t('wifi')}: {store.wifi_ssid}
-            {store.wifi_pwd ? ` · ${store.wifi_pwd}` : ''}
+          <div className="gx-wifi">
+            <span className="gx-wifi-k">{t('wifi', lang)}</span>
+            <span className="gx-wifi-v">
+              {store.wifi_ssid}
+              {store.wifi_pwd ? ` · ${store.wifi_pwd}` : ''}
+            </span>
           </div>
         )}
       </header>
 
-      {/* 招牌推荐位（不用订单数据冒充"外国人常点"，只做本店招牌） */}
-      {dishes.length >= 3 && (
-        <section className="guest-sec">
-          <h3>{t('signature')}</h3>
-          <div className="lc-stack" style={{ gap: 8, marginTop: 8 }}>
-            {dishes.slice(0, 2).map((d) => (
-              <div key={d.id} className="lc-card lc-card--flat" style={{ padding: 12 }}>
-                <div className="lc-row lc-row--between">
-                  <div>
-                    <div className="dish-name">{name(d)}</div>
-                    <div className="dish-zh">{secondary(d)}</div>
+      {/* 招牌推荐位（只做「本店招牌」，不用订单数据冒充「外国人常点」） */}
+      {signature.length >= 3 && (
+        <section className="gx-sec">
+          <SectionHead label={t('signature', lang)} accent />
+          <div className="gx-signature">
+            {signature.map((d) => {
+              const ti = title(d)
+              return (
+                <div className={`gx-scard ${d.sold_out ? 'is-out' : ''}`} key={d.id}>
+                  <div className="gx-scard-name">
+                    {ti.text}
+                    {!ti.ok && <span className="gx-tag gx-tag--pending">{t('pending', lang)}</span>}
                   </div>
-                  {d.price != null && <div className="dish-price">¥{d.price}</div>}
+                  {lang !== 'zh' && <div className="gx-scard-orig">{d.name_zh}</div>}
+                  {d.price != null && <div className="gx-scard-price">¥{d.price}</div>}
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </section>
       )}
 
-      {groups.map(([cat, list]) => (
-        <section className="guest-sec" key={cat}>
-          <h3>{cat === '其他' ? t('menu') : cat}</h3>
-          {list.map((d) => (
-            <div className={`dish ${d.sold_out ? 'is-out' : ''}`} key={d.id}>
-              <div className="dish-main">
-                <div className="dish-name">
-                  {name(d)}{' '}
-                  {d.sold_out && <span className="lc-badge">{t('soldOut')}</span>}
-                  {!d.sold_out && d.remaining != null && (
-                    <span className="lc-badge lc-badge--warn">
-                      {t('left')} {d.remaining}
-                    </span>
-                  )}
-                </div>
-                {secondary(d) && <div className="dish-zh">{secondary(d)}</div>}
-              </div>
-              {d.price != null && <div className="dish-price">¥{d.price}</div>}
-            </div>
-          ))}
-        </section>
-      ))}
+      {groups.map(([cat, list]) => {
+        const catName = cat ? (catNames[cat] ?? cat) : t('menu', lang)
+        const catOk = !cat || lang === 'zh' || Boolean(catNames[cat])
+        return (
+          <section className="gx-sec" key={cat || '_'}>
+            <SectionHead label={catName} pending={catOk ? '' : t('pending', lang)} />
+            <ul className="gx-dishes">
+              {list.map((d) => {
+                const ti = title(d)
+                return (
+                  <li className={`gx-dish ${d.sold_out ? 'is-out' : ''}`} key={d.id}>
+                    <div className="gx-dish-body">
+                      <div className="gx-dish-name">
+                        <span className={ti.ok ? '' : 'gx-pending-text'}>{ti.text}</span>
+                        {!ti.ok && <span className="gx-tag gx-tag--pending">{t('pending', lang)}</span>}
+                        {d.sold_out && <span className="gx-tag gx-tag--out">{t('soldOut', lang)}</span>}
+                        {!d.sold_out && d.remaining != null && (
+                          <span className="gx-tag gx-tag--warn">
+                            {t('left', lang)} {d.remaining}
+                          </span>
+                        )}
+                      </div>
+                      {lang !== 'zh' && (
+                        <div className={`gx-dish-orig ${ti.ok ? '' : 'gx-dish-orig--hint'}`}>
+                          {ti.ok ? d.name_zh : t('pendingHint', lang)}
+                        </div>
+                      )}
+                    </div>
+                    {d.price != null && <div className="gx-dish-price">¥{d.price}</div>}
+                  </li>
+                )
+              })}
+            </ul>
+          </section>
+        )
+      })}
 
       {dishes.length === 0 && (
-        <div className="guest-sec">
-          <p className="lc-muted">
-            {lang === 'en' ? 'The menu is being prepared.' : '菜单正在准备中。'}
-          </p>
-        </div>
+        <section className="gx-sec">
+          <p className="lc-muted">{t('emptyMenu', lang)}</p>
+        </section>
       )}
 
-      <div className="guest-bar">
-        <button className="lc-btn lc-btn--ghost" onClick={() => setHelpOpen(true)}>
-          {t('ask')}
+      {lang !== 'zh' && dishes.length > 0 && <p className="gx-note">{t('machineNote', lang)}</p>}
+
+      <div className="gx-bar">
+        <button className="gx-btn gx-btn--ghost" onClick={() => setHelpOpen(true)}>
+          {t('ask', lang)}
         </button>
-        <button className="lc-btn lc-btn--primary lc-btn--block" onClick={() => setRateOpen(true)}>
-          {t('rate')}
+        <button className="gx-btn gx-btn--primary" onClick={() => setRateOpen(true)}>
+          {t('rate', lang)}
         </button>
       </div>
 
@@ -214,56 +224,105 @@ export default function StorePage() {
         <RateSheet
           lang={lang}
           slug={slug}
-          ref={ref}
-          couponContent={couponContent}
+          refCode={ref}
           onClose={() => setRateOpen(false)}
-          onDone={(c) => {
+          onDone={(c, gift) => {
             setCoupon(c)
+            setCouponGift(gift ?? '')
+            setRateOpen(false) // 先关评价层，再弹券层，避免两层叠加
             setCouponChecked(true)
           }}
         />
       )}
 
-      {helpOpen && (
-        <div className="modal-mask" onClick={() => setHelpOpen(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="lc-row lc-row--between" style={{ marginBottom: 12 }}>
-              <h2 style={{ margin: 0 }}>{t('ask')}</h2>
-              <button className="lc-btn lc-btn--sm lc-btn--ghost" onClick={() => setHelpOpen(false)}>
-                {t('close')}
-              </button>
-            </div>
-            <div className="lc-stack" style={{ gap: 8 }}>
-              {PHRASES.map((p) => (
-                <div key={p.zh} className="lc-card lc-card--flat" style={{ padding: '10px 12px' }}>
-                  <div style={{ fontWeight: 700 }}>{p.en}</div>
-                  <div className="lc-dim">{p.zh}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
+      {helpOpen && <HelpSheet lang={lang} onClose={() => setHelpOpen(false)} />}
+
+      {langOpen && (
+        <LangSheet
+          langs={langs}
+          current={lang}
+          onPick={(code) => {
+            setLang(code)
+            setLangOpen(false)
+          }}
+          onClose={() => setLangOpen(false)}
+        />
       )}
 
       {couponChecked && (
-        <CouponSheet lang={lang} coupon={coupon} onClose={() => setCouponChecked(false)} />
+        <CouponSheet
+          lang={lang}
+          coupon={coupon}
+          gift={couponGift}
+          content={couponContent}
+          onClose={() => setCouponChecked(false)}
+        />
       )}
     </div>
   )
 }
 
-/** 三维度评价弹层：菜品 / 服务 / 会再来吗。 */
-function RateSheet(props: {
-  lang: Lang
-  slug: string
-  ref: string
-  couponContent: Record<string, unknown>
-  onClose: () => void
-  onDone: (c: Coupon | null) => void
-}) {
-  const { lang, slug, ref, onClose, onDone } = props
-  const t = (k: string) => T[lang][k] ?? k
+/** 区块标题：目标语言大字 + 细分隔线；缺译文时挂「未翻译」标。 */
+function SectionHead({ label, pending, accent }: { label: string; pending?: string; accent?: boolean }) {
+  return (
+    <div className={`gx-sec-head ${accent ? 'is-accent' : ''}`}>
+      <h2 className="gx-cat">{label}</h2>
+      {pending && <span className="gx-tag gx-tag--pending">{pending}</span>}
+      <span className="gx-rule" />
+    </div>
+  )
+}
 
+/** 语言选择弹层：全部受支持语言，母语写法 + 中文名。 */
+function LangSheet({
+  langs,
+  current,
+  onPick,
+  onClose,
+}: {
+  langs: Lang[]
+  current: string
+  onPick: (code: string) => void
+  onClose: () => void
+}) {
+  return (
+    <div className="gx-mask" onClick={onClose}>
+      <div className="gx-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="gx-sheet-grip" />
+        <div className="gx-sheet-head">
+          <h2>{t('chooseLang', current)}</h2>
+          <button className="gx-x" onClick={onClose} aria-label={t('close', current)}>
+            ✕
+          </button>
+        </div>
+        <div className="gx-langgrid">
+          {langs.map((l) => (
+            <button
+              key={l.code}
+              className={`gx-langitem ${l.code === current ? 'is-on' : ''}`}
+              onClick={() => onPick(l.code)}
+            >
+              <span className="gx-langitem-native">{langLabel(l)}</span>
+              <span className="gx-langitem-zh">{l.name_zh}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** 三维度评价弹层：菜品 / 服务 / 会再来吗。
+ *  ★ 注意：入口参数不能叫 `ref`——那是 React 保留属性，传字符串会触发
+ *  "Function components cannot have string refs" 并让整个弹层崩掉。故用 refCode。 */
+function RateSheet(props: {
+  lang: string
+  slug: string
+  refCode: string
+  onClose: () => void
+  onDone: (c: Coupon | null, gift?: string) => void
+}) {
+  const { lang, slug, refCode, onClose, onDone } = props
   const [dish, setDish] = useState(0)
   const [service, setService] = useState(0)
   const [ret, setRet] = useState(0)
@@ -279,14 +338,14 @@ function RateSheet(props: {
     setErr('')
     try {
       const res = await api.submitRating(slug, {
-        ref,
+        ref: refCode,
         score_dish: dish,
         score_service: service,
         score_return: ret,
         comment: comment.trim(),
         lang,
       })
-      onDone(res.coupon)
+      onDone(res.coupon, res.coupon_gift)
     } catch (e) {
       setErr((e as Error).message)
     } finally {
@@ -295,26 +354,32 @@ function RateSheet(props: {
   }
 
   return (
-    <div className="modal-mask" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{t('rateTitle')}</h2>
-        <div className="lc-stack" style={{ gap: 16, marginTop: 6 }}>
-          <Stars label={t('q1')} value={dish} onChange={setDish} />
-          <Stars label={t('q2')} value={service} onChange={setService} />
-          <Stars label={t('q3')} value={ret} onChange={setRet} />
+    <div className="gx-mask" onClick={onClose}>
+      <div className="gx-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="gx-sheet-grip" />
+        <div className="gx-sheet-head">
+          <h2>{t('rateTitle', lang)}</h2>
+          <button className="gx-x" onClick={onClose} aria-label={t('close', lang)}>
+            ✕
+          </button>
+        </div>
+        <div className="gx-stack">
+          <Stars label={t('q1', lang)} value={dish} onChange={setDish} />
+          <Stars label={t('q2', lang)} value={service} onChange={setService} />
+          <Stars label={t('q3', lang)} value={ret} onChange={setRet} />
           <textarea
-            className="lc-textarea"
-            placeholder={t('commentPh')}
+            className="gx-textarea"
+            placeholder={t('commentPh', lang)}
             value={comment}
             onChange={(e) => setComment(e.target.value)}
           />
-          {err && <div className="lc-alert lc-alert--err">{err}</div>}
-          <div className="lc-row" style={{ gap: 10 }}>
-            <button className="lc-btn lc-btn--ghost" onClick={onClose}>
-              {t('close')}
+          {err && <div className="gx-alert">{err}</div>}
+          <div className="gx-sheet-actions">
+            <button className="gx-btn gx-btn--ghost" onClick={onClose}>
+              {t('close', lang)}
             </button>
-            <button className="lc-btn lc-btn--primary lc-btn--block" disabled={!ready || busy} onClick={submit}>
-              {busy ? t('submitting') : t('submit')}
+            <button className="gx-btn gx-btn--primary" disabled={!ready || busy} onClick={submit}>
+              {busy ? t('submitting', lang) : t('submit', lang)}
             </button>
           </div>
         </div>
@@ -326,15 +391,13 @@ function RateSheet(props: {
 function Stars({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
   return (
     <div>
-      <div className="lc-label" style={{ marginBottom: 2 }}>
-        {label}
-      </div>
-      <div className="lc-stars">
+      <div className="gx-label">{label}</div>
+      <div className="gx-stars">
         {[1, 2, 3, 4, 5].map((i) => (
           <button
             key={i}
             type="button"
-            className={`lc-star ${i <= value ? 'is-on' : ''}`}
+            className={`gx-star ${i <= value ? 'is-on' : ''}`}
             aria-label={`${i}`}
             onClick={() => onChange(i)}
           >
@@ -346,28 +409,69 @@ function Stars({ label, value, onChange }: { label: string; value: number; onCha
   )
 }
 
-/** 券卡：白底例外家族——截图即券，必须在任何背景下可读可扫。 */
-function CouponSheet({ lang, coupon, onClose }: { lang: Lang; coupon: Coupon | null; onClose: () => void }) {
-  const t = (k: string) => T[lang][k] ?? k
+/** 问店员卡：目标语言在上、中文在下，客人店员都能看懂；无网也能用。 */
+function HelpSheet({ lang, onClose }: { lang: string; onClose: () => void }) {
   return (
-    <div className="modal-mask" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+    <div className="gx-mask" onClick={onClose}>
+      <div className="gx-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="gx-sheet-grip" />
+        <div className="gx-sheet-head">
+          <h2>{t('ask', lang)}</h2>
+          <button className="gx-x" onClick={onClose} aria-label={t('close', lang)}>
+            ✕
+          </button>
+        </div>
+        <p className="gx-hint">{t('helpTitle', lang)}</p>
+        <div className="gx-stack">
+          {PHRASES.map((p) => (
+            <div key={p.zh} className="gx-phrase">
+              <div className="gx-phrase-main">{phraseText(p, lang)}</div>
+              {lang !== 'zh' && <div className="gx-phrase-zh">{p.zh}</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** 券卡：白底例外家族——截图即券，必须在任何背景下可读可扫。
+ *  券面文案优先级：后端本地化结果（coupon_gift）→ 模板多语字段 → 英文 → 中文。 */
+function CouponSheet({
+  lang,
+  coupon,
+  gift,
+  content,
+  onClose,
+}: {
+  lang: string
+  coupon: Coupon | null
+  gift: string
+  content: Record<string, unknown>
+  onClose: () => void
+}) {
+  const text = gift || String(content[lang] ?? content.en ?? content.zh ?? '')
+  return (
+    <div className="gx-mask" onClick={onClose}>
+      <div className="gx-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="gx-sheet-grip" />
         {coupon ? (
           <>
-            <h2>{t('couponTitle')}</h2>
-            <div className="coupon" style={{ marginTop: 10 }}>
-              <div style={{ fontSize: 13, color: '#5c5c63' }}>{t('couponTip')}</div>
-              <div className="coupon-code">{coupon.code}</div>
-              <div style={{ fontSize: 12.5, color: '#8e8e96' }}>
-                {t('validUntil')} {new Date(coupon.expire_at).toLocaleDateString()}
+            <h2 className="gx-coupon-title">{t('couponTitle', lang)}</h2>
+            <div className="gx-coupon">
+              {text && <div className="gx-coupon-gift">{text}</div>}
+              <div className="gx-coupon-tip">{t('couponTip', lang)}</div>
+              <div className="gx-coupon-code">{coupon.code}</div>
+              <div className="gx-coupon-date">
+                {t('validUntil', lang)} {new Date(coupon.expire_at).toLocaleDateString()}
               </div>
             </div>
           </>
         ) : (
-          <h2>{t('noCoupon')}</h2>
+          <h2 className="gx-coupon-title">{t('couponTitle', lang)}</h2>
         )}
-        <button className="lc-btn lc-btn--primary lc-btn--block" style={{ marginTop: 16 }} onClick={onClose}>
-          {t('done')}
+        <button className="gx-btn gx-btn--primary gx-btn--block" style={{ marginTop: 16 }} onClick={onClose}>
+          {t('done', lang)}
         </button>
       </div>
     </div>

@@ -36,7 +36,7 @@ func main() {
 
 	r := repo.New(database)
 	ocr := service.NewOCR(cfg.OCRServiceURL)
-	tr := service.NewTranslator(cfg.TranslateURL)
+	tr := service.NewTranslator(cfg.TranslateURL, cfg.MTEmail, r)
 	srv := httpapi.NewServer(cfg, r, ocr, tr)
 
 	httpSrv := &http.Server{

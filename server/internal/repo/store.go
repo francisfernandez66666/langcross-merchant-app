@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -12,33 +13,23 @@ import (
 
 const storeCols = `id, account_id, name, COALESCE(addr,''), geo_lat, geo_lng,
 	COALESCE(wifi_ssid,''), COALESCE(wifi_pwd,''), COALESCE(business_hours,''),
-	coupon_enabled, service_tier, order_mode, slug, created_at`
+	coupon_enabled, service_tier, order_mode, slug, category_names, created_at`
 
 // CreateStore 新建门店。slug 冲突时自动重试。
 func (r *Repo) CreateStore(ctx context.Context, accountID, name, slug string) (*domain.Store, error) {
 	for attempt := 0; attempt < 5; attempt++ {
-		s := &domain.Store{
-			ID:            idgen.New(),
-			AccountID:     accountID,
-			Name:          name,
-			Slug:          slug,
-			CouponEnabled: true,
-			ServiceTier:   "pure",
-			OrderMode:     "assist",
-		}
-		err := r.DB.QueryRowContext(ctx,
+		row := r.DB.QueryRowContext(ctx,
 			`INSERT INTO store(id, account_id, name, slug)
 			 VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (slug) DO NOTHING
 			 RETURNING `+storeCols,
-			s.ID, s.AccountID, s.Name, s.Slug).Scan(
-			&s.ID, &s.AccountID, &s.Name, &s.Addr, &s.GeoLat, &s.GeoLng,
-			&s.WifiSSID, &s.WifiPwd, &s.BusinessHours,
-			&s.CouponEnabled, &s.ServiceTier, &s.OrderMode, &s.Slug, &s.CreatedAt)
+			idgen.New(), accountID, name, slug)
+
+		s, err := scanStore(row)
 		if err == nil {
 			return s, nil
 		}
-		if errors.Is(err, sql.ErrNoRows) { // slug 撞了，换一个再来
+		if errors.Is(err, ErrNotFound) { // slug 撞了，换一个再来
 			slug = idgen.Slug()
 			continue
 		}
@@ -49,13 +40,13 @@ func (r *Repo) CreateStore(ctx context.Context, accountID, name, slug string) (*
 
 // GetStoreBySlug 按 slug 查门店（客人端入口）。
 func (r *Repo) GetStoreBySlug(ctx context.Context, slug string) (*domain.Store, error) {
-	return r.scanStore(r.DB.QueryRowContext(ctx,
+	return scanStore(r.DB.QueryRowContext(ctx,
 		`SELECT `+storeCols+` FROM store WHERE slug = $1`, slug))
 }
 
 // GetStoreByID 按 ID 查门店。
 func (r *Repo) GetStoreByID(ctx context.Context, id string) (*domain.Store, error) {
-	return r.scanStore(r.DB.QueryRowContext(ctx,
+	return scanStore(r.DB.QueryRowContext(ctx,
 		`SELECT `+storeCols+` FROM store WHERE id = $1`, id))
 }
 
@@ -68,15 +59,13 @@ func (r *Repo) ListStoresByAccount(ctx context.Context, accountID string) ([]dom
 	}
 	defer rows.Close()
 
-	var out []domain.Store
+	out := []domain.Store{}
 	for rows.Next() {
-		var s domain.Store
-		if err := rows.Scan(&s.ID, &s.AccountID, &s.Name, &s.Addr, &s.GeoLat, &s.GeoLng,
-			&s.WifiSSID, &s.WifiPwd, &s.BusinessHours,
-			&s.CouponEnabled, &s.ServiceTier, &s.OrderMode, &s.Slug, &s.CreatedAt); err != nil {
+		s, err := scanStore(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, s)
+		out = append(out, *s)
 	}
 	return out, rows.Err()
 }
@@ -114,15 +103,37 @@ func (r *Repo) UpdateStore(ctx context.Context, id string, p StorePatch) (*domai
 	return r.GetStoreByID(ctx, id)
 }
 
-func (r *Repo) scanStore(row *sql.Row) (*domain.Store, error) {
-	var s domain.Store
-	if err := row.Scan(&s.ID, &s.AccountID, &s.Name, &s.Addr, &s.GeoLat, &s.GeoLng,
+// UpdateStoreCategoryNames 整体写入门店的分类名多语种表（{lang: {原文: 译文}}）。
+func (r *Repo) UpdateStoreCategoryNames(ctx context.Context, id string, names map[string]map[string]string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(names)
+	if err != nil {
+		return fmt.Errorf("marshal category names: %w", err)
+	}
+	if _, err := r.DB.ExecContext(ctx,
+		`UPDATE store SET category_names = $2 WHERE id = $1`, id, raw); err != nil {
+		return fmt.Errorf("update category names: %w", err)
+	}
+	return nil
+}
+
+func scanStore(sc rowScanner) (*domain.Store, error) {
+	var (
+		s       domain.Store
+		catJSON []byte
+	)
+	if err := sc.Scan(&s.ID, &s.AccountID, &s.Name, &s.Addr, &s.GeoLat, &s.GeoLng,
 		&s.WifiSSID, &s.WifiPwd, &s.BusinessHours,
-		&s.CouponEnabled, &s.ServiceTier, &s.OrderMode, &s.Slug, &s.CreatedAt); err != nil {
+		&s.CouponEnabled, &s.ServiceTier, &s.OrderMode, &s.Slug, &catJSON, &s.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
+	}
+	if len(catJSON) > 0 {
+		_ = json.Unmarshal(catJSON, &s.CategoryNames)
 	}
 	return &s, nil
 }

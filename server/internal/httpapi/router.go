@@ -60,6 +60,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/public/translate-preview", s.handlePreviewTranslate)
 
 	// ── 工具 ──
+	mux.HandleFunc("GET /api/translation/langs", s.handleLangs)
 	mux.HandleFunc("POST /api/ocr/extract", s.handleOCR)
 	mux.HandleFunc("POST /api/events", s.handleTrack)
 

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -248,12 +249,78 @@ func (s *Server) handleConfirmDraft(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"ok": true, "draft_id": draftID})
 }
 
+// distinctCategories 取出菜品里出现过的分类名（去重、保序、剔除空值）。
+func distinctCategories(dishes []domain.Dish) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, d := range dishes {
+		c := strings.TrimSpace(d.Category)
+		if c == "" || seen[c] {
+			continue
+		}
+		seen[c] = true
+		out = append(out, c)
+	}
+	return out
+}
+
+// translateCategories 把分类名翻成各目标语种，返回 {lang: {原文: 译文}}。
+// 分类是每店少量且稳定的词，翻一次长期复用（走 TM 缓存，成本可忽略）；
+// 未命中的分类留空，前端回落显示原文——不编造。
+func (s *Server) translateCategories(ctx context.Context, from string, cats, targets []string) map[string]map[string]string {
+	if len(cats) == 0 {
+		return nil
+	}
+	out := map[string]map[string]string{}
+	for _, tg := range targets {
+		res, err := s.tr.Translate(ctx, cats, from, tg)
+		if err != nil && len(res) == 0 {
+			continue
+		}
+		m := map[string]string{}
+		for i, c := range cats {
+			if i < len(res) && res[i] != "" {
+				m[c] = res[i]
+			}
+		}
+		if len(m) > 0 {
+			out[tg] = m
+		}
+	}
+	return out
+}
+
+// mergeCategoryNames 把新翻到的分类译文并入既有表（同语种内后写覆盖，便于人工校正生效）。
+func mergeCategoryNames(dst map[string]map[string]string, add map[string]map[string]string) map[string]map[string]string {
+	if len(add) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = map[string]map[string]string{}
+	}
+	for lang, m := range add {
+		if dst[lang] == nil {
+			dst[lang] = map[string]string{}
+		}
+		for k, v := range m {
+			dst[lang][k] = v
+		}
+	}
+	return dst
+}
+
 // handleTranslate 多语化（P4）：只翻译勾选的菜；未确认的确认稿拒绝翻译。
+// 支持一次翻多个语种（targets），并保留已有的售罄/剩余状态与既有译文。
 func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {
 	st, ok2 := s.requireStore(w, r)
 	if !ok2 {
 		return
 	}
+	var req struct {
+		Targets []string `json:"targets"`
+	}
+	_ = decodeJSON(r, &req)
+	targets := normalizeTargets(req.Targets, "")
 
 	d, err := s.repo.GetLatestDraft(r.Context(), st.ID)
 	if errors.Is(err, repo.ErrNotFound) {
@@ -280,14 +347,11 @@ func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {
 		picked = d.Items
 	}
 
-	names := make([]string, len(picked))
-	for i, it := range picked {
-		names[i] = it.Name
-	}
-	translated, err := s.tr.Translate(r.Context(), names, d.Lang, "en")
-	if err != nil {
-		fail(w, http.StatusBadGateway, CodeInternal, "翻译服务不可用")
-		return
+	// 保留既有状态：售罄 / 每日剩余 / 属性 / 已有译文
+	existing, _ := s.repo.ListDishes(r.Context(), st.ID)
+	prev := map[string]domain.Dish{}
+	for _, x := range existing {
+		prev[x.NameZh] = x
 	}
 
 	dishes := make([]domain.Dish, 0, len(picked))
@@ -295,20 +359,73 @@ func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {
 		dish := domain.Dish{
 			NameZh: it.Name, Price: it.Price, Category: it.Category, SortOrder: i,
 			Attrs: map[string]any{"spicy": 0, "allergens": []string{}},
+			Names: map[string]string{},
 		}
-		if i < len(translated) && translated[i] != "" {
-			dish.NameEn = translated[i]
+		if old, ok := prev[it.Name]; ok {
+			dish.SoldOut = old.SoldOut
+			dish.Remaining = old.Remaining
+			if len(old.Attrs) > 0 {
+				dish.Attrs = old.Attrs
+			}
+			for k, v := range old.Names {
+				dish.Names[k] = v
+			}
 		}
 		dishes = append(dishes, dish)
 	}
+
+	// 逐语种翻译：已有译文的跳过（省配额，也避免覆盖人工校对过的结果）
+	translatedTotal := 0
+	for _, tg := range targets {
+		var idx []int
+		var texts []string
+		for i := range dishes {
+			if dishes[i].Names[tg] == "" {
+				idx = append(idx, i)
+				texts = append(texts, dishes[i].NameZh)
+			}
+		}
+		if len(texts) == 0 {
+			continue
+		}
+		out, terr := s.tr.Translate(r.Context(), texts, d.Lang, tg)
+		if terr != nil && len(out) == 0 {
+			continue
+		}
+		for j, i := range idx {
+			if j < len(out) && out[j] != "" {
+				dishes[i].Names[tg] = out[j]
+				translatedTotal++
+			}
+		}
+	}
+	for i := range dishes {
+		dishes[i].NameEn = dishes[i].Names["en"]
+	}
+
 	if err := s.repo.ReplaceDishes(r.Context(), st.ID, dishes); err != nil {
 		fail(w, http.StatusInternalServerError, CodeInternal, "写入菜单失败")
 		return
 	}
+
+	// 分类名同批多语化：否则客人端会出现「外语菜名 + 中文分类标题」的割裂页面
+	cats := distinctCategories(dishes)
+	catNames := mergeCategoryNames(st.CategoryNames, s.translateCategories(r.Context(), d.Lang, cats, targets))
+	if err := s.repo.UpdateStoreCategoryNames(r.Context(), st.ID, catNames); err != nil {
+		// 分类翻译失败不阻断主流程：菜名已多语化，分类回落原文即可
+		_ = err
+	}
 	_ = s.repo.TrackEvent(r.Context(), st.ID, "e_translate_done", nil)
 
 	saved, _ := s.repo.ListDishes(r.Context(), st.ID)
-	ok(w, map[string]any{"ok": true, "dishes": saved, "translated_count": len(dishes)})
+	ok(w, map[string]any{
+		"ok":               true,
+		"dishes":           saved,
+		"translated_count": translatedTotal,
+		"targets":          targets,
+		"category_names":   catNames,
+		"engine":           s.tr.Name(),
+	})
 }
 
 // handleListDishes 列出菜单。
@@ -383,13 +500,13 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	ratings, _ := s.repo.ListRatings(r.Context(), st.ID, 20)
 
 	ok(w, map[string]any{
-		"ok":             true,
-		"rating":         sum,
-		"scans":          scans,
-		"coupons_issued": len(coupons),
+		"ok":               true,
+		"rating":           sum,
+		"scans":            scans,
+		"coupons_issued":   len(coupons),
 		"coupons_redeemed": redeemed,
-		"recent_ratings": ratings,
-		"scope_note":     "只统计用我们工具的外国客数据，不是全店经营数据",
+		"recent_ratings":   ratings,
+		"scope_note":       "只统计用我们工具的外国客数据，不是全店经营数据",
 	})
 }
 

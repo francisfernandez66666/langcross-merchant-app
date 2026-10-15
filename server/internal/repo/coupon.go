@@ -15,9 +15,9 @@ import (
 // DefaultCouponContent 是注册后自动配好的标准券（小额、可截图、14 天有效）。
 func DefaultCouponContent() map[string]any {
 	return map[string]any{
-		"type":     "gift", // 赠饮 / 小食
-		"zh":       "凭券到店赠小食一份",
-		"en":       "Free side dish on your next visit",
+		"type":       "gift", // 赠饮 / 小食
+		"zh":         "凭券到店赠小食一份",
+		"en":         "Free side dish on your next visit",
 		"valid_days": 14,
 	}
 }

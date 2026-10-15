@@ -12,35 +12,39 @@ type Account struct {
 
 // Store 门店。slug 定死为 /s/{slug}，物料印刷后不可变。
 type Store struct {
-	ID            string    `json:"id"`
-	AccountID     string    `json:"account_id"`
-	Name          string    `json:"name"`
-	Addr          string    `json:"addr,omitempty"`
-	GeoLat        *float64  `json:"geo_lat,omitempty"`
-	GeoLng        *float64  `json:"geo_lng,omitempty"`
-	WifiSSID      string    `json:"wifi_ssid,omitempty"`
-	WifiPwd       string    `json:"wifi_pwd,omitempty"`
-	BusinessHours string    `json:"business_hours,omitempty"`
-	CouponEnabled bool      `json:"coupon_enabled"`
-	ServiceTier   string    `json:"service_tier"` // pure 纯翻译档 / service 外客服务档
-	OrderMode     string    `json:"order_mode"`   // assist 辅助型 / replace 替代型
-	Slug          string    `json:"slug"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID            string   `json:"id"`
+	AccountID     string   `json:"account_id"`
+	Name          string   `json:"name"`
+	Addr          string   `json:"addr,omitempty"`
+	GeoLat        *float64 `json:"geo_lat,omitempty"`
+	GeoLng        *float64 `json:"geo_lng,omitempty"`
+	WifiSSID      string   `json:"wifi_ssid,omitempty"`
+	WifiPwd       string   `json:"wifi_pwd,omitempty"`
+	BusinessHours string   `json:"business_hours,omitempty"`
+	CouponEnabled bool     `json:"coupon_enabled"`
+	ServiceTier   string   `json:"service_tier"` // pure 纯翻译档 / service 外客服务档
+	OrderMode     string   `json:"order_mode"`   // assist 辅助型 / replace 替代型
+	Slug          string   `json:"slug"`
+	// CategoryNames 是分类名的多语种表：{lang: {原文分类: 译文}}。
+	// 与 Dish.Names 同构，保证客人端「分类标题 + 菜名」整体切换到目标语言。
+	CategoryNames map[string]map[string]string `json:"category_names,omitempty"`
+	CreatedAt     time.Time                    `json:"created_at"`
 }
 
 // Dish 菜品（多语化后的成品）。
 type Dish struct {
-	ID          string         `json:"id"`
-	StoreID     string         `json:"store_id"`
-	NameZh      string         `json:"name_zh"`
-	NameEn      string         `json:"name_en,omitempty"`
-	Description string         `json:"description,omitempty"`
-	Price       *float64       `json:"price,omitempty"`
-	Category    string         `json:"category,omitempty"`
-	Attrs       map[string]any `json:"attrs,omitempty"` // 过敏原 / 辣度 / 宗教
-	SortOrder   int            `json:"sort_order"`
-	SoldOut     bool           `json:"sold_out"`
-	Remaining   *int           `json:"remaining,omitempty"` // 每日剩余（唯一动态字段）
+	ID          string            `json:"id"`
+	StoreID     string            `json:"store_id"`
+	NameZh      string            `json:"name_zh"`
+	NameEn      string            `json:"name_en,omitempty"`
+	Names       map[string]string `json:"names,omitempty"` // 多语种菜名，如 {"en":"...","ja":"..."}
+	Description string            `json:"description,omitempty"`
+	Price       *float64          `json:"price,omitempty"`
+	Category    string            `json:"category,omitempty"`
+	Attrs       map[string]any    `json:"attrs,omitempty"` // 过敏原 / 辣度 / 宗教
+	SortOrder   int               `json:"sort_order"`
+	SoldOut     bool              `json:"sold_out"`
+	Remaining   *int              `json:"remaining,omitempty"` // 每日剩余（唯一动态字段）
 }
 
 // DraftItem 原文确认稿里的一道菜（原始语言）。

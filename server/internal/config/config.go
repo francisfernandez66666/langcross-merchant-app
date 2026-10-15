@@ -14,7 +14,8 @@ type Config struct {
 	Secret        string // token 签名密钥（生产必须改）
 	DevMode       bool   // 开发模式：验证码固定、错误更详细
 	OCRServiceURL string // Python OCR 微服务；为空则走内置 stub（手动保底）
-	TranslateURL  string // 既有翻译链 /api/translation；为空则走内置词典
+	TranslateURL  string // 既有翻译链 /api/translation；为空则走 MyMemory（本地开发）
+	MTEmail       string // MyMemory 联系邮箱（可选，提升免费配额）
 }
 
 func env(key, def string) string {
@@ -34,5 +35,6 @@ func Load() Config {
 		DevMode:       env("LC_DEV", "1") == "1",
 		OCRServiceURL: env("LC_OCR_URL", ""),
 		TranslateURL:  env("LC_TRANSLATE_URL", ""),
+		MTEmail:       env("LC_MT_EMAIL", ""),
 	}
 }

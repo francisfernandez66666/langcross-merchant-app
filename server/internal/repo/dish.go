@@ -10,7 +10,7 @@ import (
 	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/idgen"
 )
 
-const dishCols = `id, store_id, name_zh, COALESCE(name_en,''), COALESCE(description,''),
+const dishCols = `id, store_id, name_zh, COALESCE(name_en,''), names_json, COALESCE(description,''),
 	price, COALESCE(category,''), attrs_json, sort_order, sold_out, remaining`
 
 // ReplaceDishes 用给定清单整体替换某店菜品（单事务，先清后插）。
@@ -31,15 +31,21 @@ func (r *Repo) ReplaceDishes(ctx context.Context, storeID string, dishes []domai
 				return fmt.Errorf("marshal attrs: %w", err)
 			}
 		}
+		names := []byte("{}")
+		if len(d.Names) > 0 {
+			if names, err = json.Marshal(d.Names); err != nil {
+				return fmt.Errorf("marshal names: %w", err)
+			}
+		}
 		id := d.ID
 		if id == "" {
 			id = idgen.New()
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO dish(id, store_id, name_zh, name_en, description, price, category,
+			`INSERT INTO dish(id, store_id, name_zh, name_en, names_json, description, price, category,
 			                  attrs_json, sort_order, sold_out, remaining)
-			 VALUES ($1,$2,$3,NULLIF($4,''),NULLIF($5,''),$6,NULLIF($7,''),$8,$9,$10,$11)`,
-			id, storeID, d.NameZh, d.NameEn, d.Description, d.Price, d.Category,
+			 VALUES ($1,$2,$3,NULLIF($4,''),$5,NULLIF($6,''),$7,NULLIF($8,''),$9,$10,$11,$12)`,
+			id, storeID, d.NameZh, d.NameEn, names, d.Description, d.Price, d.Category,
 			attrs, i, d.SoldOut, d.Remaining); err != nil {
 			return fmt.Errorf("insert dish %q: %w", d.NameZh, err)
 		}
@@ -87,12 +93,13 @@ type rowScanner interface {
 
 func scanDish(sc rowScanner) (*domain.Dish, error) {
 	var (
-		d       domain.Dish
-		price   sql.NullFloat64
-		attrs   []byte
-		remain  sql.NullInt64
+		d      domain.Dish
+		price  sql.NullFloat64
+		names  []byte
+		attrs  []byte
+		remain sql.NullInt64
 	)
-	if err := sc.Scan(&d.ID, &d.StoreID, &d.NameZh, &d.NameEn, &d.Description,
+	if err := sc.Scan(&d.ID, &d.StoreID, &d.NameZh, &d.NameEn, &names, &d.Description,
 		&price, &d.Category, &attrs, &d.SortOrder, &d.SoldOut, &remain); err != nil {
 		return nil, err
 	}
@@ -102,6 +109,9 @@ func scanDish(sc rowScanner) (*domain.Dish, error) {
 	if remain.Valid {
 		v := int(remain.Int64)
 		d.Remaining = &v
+	}
+	if len(names) > 0 {
+		_ = json.Unmarshal(names, &d.Names)
 	}
 	if len(attrs) > 0 {
 		_ = json.Unmarshal(attrs, &d.Attrs)

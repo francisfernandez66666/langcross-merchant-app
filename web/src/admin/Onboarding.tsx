@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { api, tokenStore, type CouponTemplate, type DraftItem, type Store, type StoreLinks } from '../api/client'
+import {
+  api,
+  tokenStore,
+  type CouponTemplate,
+  type DraftItem,
+  type Lang,
+  type Store,
+  type StoreLinks,
+} from '../api/client'
 
 /** 示例菜单：用于本地无 OCR 服务时快速演示后续步骤。 */
 const SAMPLE: DraftItem[] = [
@@ -17,19 +25,23 @@ const SAMPLE: DraftItem[] = [
   { name: '啤酒', price: 12, category: '饮品', selected: true },
 ]
 
+/** P4 默认勾选的语种：覆盖最大的三拨客人（欧美 / 日 / 韩）。 */
+const DEFAULT_TARGETS = ['en', 'ja', 'ko']
+
 const STEP_TITLES = ['算损失', '上传菜单', '挑要翻译的菜', '核心多语言', '注册解锁']
 
 export default function Onboarding() {
   const nav = useNavigate()
   const [step, setStep] = useState(1)
   const [items, setItems] = useState<DraftItem[]>([])
+  const [targets, setTargets] = useState<string[]>(DEFAULT_TARGETS)
   const [result, setResult] = useState<{ store: Store; links: StoreLinks; coupon?: CouponTemplate } | null>(null)
 
   const go = (n: number) => setStep(Math.min(5, Math.max(1, n)))
 
   return (
     <div className="warm" style={{ minHeight: '100%', background: 'var(--lc-bg)', color: 'var(--lc-text)' }}>
-      <div className="lc-wrap" style={{ maxWidth: 620, paddingTop: 34 }}>
+      <div className="lc-wrap" style={{ maxWidth: 720, paddingTop: 34 }}>
         <div className="lc-row lc-row--between" style={{ marginBottom: 14 }}>
           <div className="lc-dim">能言翻译助手 · 商家上线（{step}/5）</div>
           <button className="lc-btn lc-btn--sm lc-btn--ghost" onClick={() => nav('/admin')}>
@@ -56,14 +68,8 @@ export default function Onboarding() {
           />
         )}
         {step === 3 && <Step3 items={items} setItems={setItems} onNext={() => go(4)} />}
-        {step === 4 && <Step4 items={items} onNext={() => go(5)} />}
-        {step === 5 && (
-          <Step5
-            items={items}
-            result={result}
-            setResult={setResult}
-          />
-        )}
+        {step === 4 && <Step4 items={items} targets={targets} setTargets={setTargets} onNext={() => go(5)} />}
+        {step === 5 && <Step5 items={items} targets={targets} result={result} setResult={setResult} />}
 
         {step > 1 && !result && (
           <div style={{ marginTop: 22 }}>
@@ -236,41 +242,126 @@ function Step3({
 }
 
 /** P4 · 核心多语言（全程唯一一次真生成 · 需联网）。 */
-function Step4({ items, onNext }: { items: DraftItem[]; onNext: () => void }) {
+function Step4({
+  items,
+  targets,
+  setTargets,
+  onNext,
+}: {
+  items: DraftItem[]
+  targets: string[]
+  setTargets: (v: string[]) => void
+  onNext: () => void
+}) {
+  const [langs, setLangs] = useState<Lang[]>([])
   const [out, setOut] = useState<DraftItem[]>([])
+  const [cats, setCats] = useState<Record<string, Record<string, string>>>({})
   const [busy, setBusy] = useState(true)
   const [err, setErr] = useState('')
 
   useEffect(() => {
-    const picked = items.filter((i) => i.selected)
+    api.langs().then((d) => setLangs(d.langs ?? [])).catch(() => undefined)
+  }, [])
+
+  const picked = items.filter((i) => i.selected)
+  // 用 join 做依赖：避免 targets 数组引用变化导致重复请求
+  const key = targets.join(',')
+
+  useEffect(() => {
+    if (picked.length === 0 || targets.length === 0) {
+      setBusy(false)
+      return
+    }
+    let alive = true
+    setBusy(true)
+    setErr('')
     api
-      .previewTranslate(picked)
-      .then((r) => setOut(r.items))
-      .catch((e: Error) => setErr(e.message))
-      .finally(() => setBusy(false))
-  }, [items])
+      .previewTranslate(picked, targets)
+      .then((r) => {
+        if (!alive) return
+        setOut(r.items)
+        setCats(r.categories ?? {})
+      })
+      .catch((e: Error) => alive && setErr(e.message))
+      .finally(() => alive && setBusy(false))
+    return () => {
+      alive = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, items])
+
+  const toggle = (code: string) =>
+    setTargets(targets.includes(code) ? targets.filter((c) => c !== code) : [...targets, code])
+
+  const shown = langs.filter((l) => l.code !== 'zh')
+  const catOf = (c: string | undefined, code: string) => (c ? cats[code]?.[c] : undefined)
 
   return (
     <div className="lc-stack">
       <p className="lc-muted">
         这是你店里的菜单，翻成客人看得懂的样子。<span className="lc-badge lc-badge--warn">需联网</span>
+        勾选要覆盖的语种，一次全生成。
       </p>
-      {busy && <div className="lc-card lc-dim">正在生成…</div>}
+
+      <div className="lc-card" style={{ padding: 14 }}>
+        <div className="lc-label" style={{ marginBottom: 8 }}>
+          覆盖语种（已选 {targets.length} 种）
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+          {shown.map((l) => {
+            const on = targets.includes(l.code)
+            return (
+              <button
+                key={l.code}
+                onClick={() => toggle(l.code)}
+                className="lc-btn lc-btn--sm"
+                style={{
+                  borderColor: on ? 'var(--lc-accent)' : undefined,
+                  background: on ? 'var(--lc-accent)' : undefined,
+                  color: on ? '#fff' : undefined,
+                }}
+              >
+                {l.native}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      {busy && <div className="lc-card lc-dim">正在生成 {targets.length} 个语种…（逐语种调用，约十几秒）</div>}
       {err && <div className="lc-alert lc-alert--err">{err}</div>}
-      {!busy && (
-        <div className="lc-card">
-          {out.map((it, i) => (
-            <div key={i} className="dish">
-              <div className="dish-main">
-                <div className="dish-name">{it.name_en || it.name}</div>
-                {it.name_en ? <div className="dish-zh">{it.name}</div> : <div className="dish-zh">（未收录，保持原文，待人工确认）</div>}
+      {targets.length === 0 && <div className="lc-alert lc-alert--info">至少勾选一个语种。</div>}
+
+      {!busy && targets.length > 0 && (
+        <div className="ml-grid">
+          {targets.map((code) => {
+            const meta = langs.find((l) => l.code === code)
+            return (
+              <div className="ml-card" key={code}>
+                <div className="ml-card-h">
+                  <b>{meta?.native ?? code.toUpperCase()}</b>
+                  <span className="lc-dim">{meta?.name_zh}</span>
+                </div>
+                {out.map((it, i) => {
+                  const v = it.names?.[code]
+                  const c = catOf(it.category, code)
+                  return (
+                    <div className="ml-row" key={i}>
+                      <span className="ml-name">
+                        {c ? `${c} · ` : ''}
+                        {v || <span className="ml-miss">未收录</span>}
+                      </span>
+                      <span className="ml-zh">{it.name}</span>
+                    </div>
+                  )
+                })}
               </div>
-              {it.price != null && <div className="dish-price">¥{it.price}</div>}
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
-      <button className="lc-btn lc-btn--primary lc-btn--block" disabled={busy} onClick={onNext}>
+
+      <button className="lc-btn lc-btn--primary lc-btn--block" disabled={busy || targets.length === 0} onClick={onNext}>
         注册后即可对外使用 →
       </button>
     </div>
@@ -280,10 +371,12 @@ function Step4({ items, onNext }: { items: DraftItem[]; onNext: () => void }) {
 /** P5 · 引导注册（免费；注册后自动配券 + 生成双码）。 */
 function Step5({
   items,
+  targets,
   result,
   setResult,
 }: {
   items: DraftItem[]
+  targets: string[]
   result: { store: Store; links: StoreLinks; coupon?: CouponTemplate } | null
   setResult: (v: { store: Store; links: StoreLinks; coupon?: CouponTemplate }) => void
 }) {
@@ -315,7 +408,7 @@ function Step5({
       if (items.length > 0) {
         await api.saveDraft(created.store.id, items)
         await api.confirmDraft(created.store.id)
-        await api.translate(created.store.id)
+        await api.translate(created.store.id, targets)
       }
       setResult({ store: created.store, links: created.links, coupon: created.coupon_template })
     } catch (e) {
@@ -331,7 +424,7 @@ function Step5({
         <div className="lc-card lc-card--accent">
           <h2>上线成功 🎉</h2>
           <p className="lc-muted" style={{ marginBottom: 0 }}>
-            菜单已多语化，复购券模板已自动配好（发券免费）。把下面两张码打印出来贴好即可。
+            菜单已多语化（{targets.length} 个语种），复购券模板已自动配好（发券免费）。把下面两张码打印出来贴好即可。
           </p>
         </div>
         <div className="lc-card">

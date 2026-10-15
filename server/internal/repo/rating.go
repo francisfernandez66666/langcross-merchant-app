@@ -48,12 +48,12 @@ func (r *Repo) ListRatings(ctx context.Context, storeID string, limit int) ([]do
 
 // RatingSummary 是经营洞察用的聚合口径（只做趋势·占比·排序，不编精确百分比）。
 type RatingSummary struct {
-	Count        int     `json:"count"`
-	AvgDish      float64 `json:"avg_dish"`
-	AvgService   float64 `json:"avg_service"`
-	AvgReturn    float64 `json:"avg_return"`
-	LowRate      float64 `json:"low_rate"`      // ≤2 分占比
-	WouldReturn  float64 `json:"would_return"`  // 第③问 ≥4 占比（复购意愿）
+	Count       int     `json:"count"`
+	AvgDish     float64 `json:"avg_dish"`
+	AvgService  float64 `json:"avg_service"`
+	AvgReturn   float64 `json:"avg_return"`
+	LowRate     float64 `json:"low_rate"`     // ≤2 分占比
+	WouldReturn float64 `json:"would_return"` // 第③问 ≥4 占比（复购意愿）
 }
 
 // RatingSummaryOf 计算某店评价聚合。
