@@ -47,6 +47,9 @@ func newFakeLexicorn(t *testing.T, translation string) (*httptest.Server, *int32
 	return srv, &polls
 }
 
+// 锁定批量主链路：提交多句 → 轮询到 completed → 按行序取回译文。
+// 假平台严格按文档契约走（202 + task_id、processing×2 再 completed），
+// 任一步协议不符（轮询次数、字段名、返回结构）都会在这里现形。
 func TestLexicornTranslateBatch(t *testing.T) {
 	srv, _ := newFakeLexicorn(t, "Kung Pao Chicken\nMapo Tofu")
 	eng := NewLexicornTranslator(srv.URL, "test-key-1234567890", "pro")
@@ -92,6 +95,8 @@ func TestLexicornRejectsMisalignedResult(t *testing.T) {
 	}
 }
 
+// 锁定单句入口 TranslateOne：内部走批量协议但只取一句，
+// fast 档与批量用的 pro 档走同一条契约——防止两条路径行为分叉。
 func TestLexicornSingleText(t *testing.T) {
 	srv, _ := newFakeLexicorn(t, "Kung Pao Chicken")
 	eng := NewLexicornTranslator(srv.URL, "test-key-1234567890", "fast")

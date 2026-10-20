@@ -47,6 +47,9 @@ func TestSourceLangIsChinese(t *testing.T) {
 	}
 }
 
+// 锁定 IsSupportedLang 的判定边界：登记的 10 语种全放行；未登记的（it/ru）、
+// 空串、大写变体（EN）、带地区后缀（en-US）一律 false。
+// 大小写敏感是刻意设计：入参的规整责任在 normalizeTargets，不在这里放水。
 func TestIsSupportedLang(t *testing.T) {
 	cases := []struct {
 		code string

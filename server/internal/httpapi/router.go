@@ -8,7 +8,7 @@
 // 文件分工：
 //
 //	router.go            路由表 + 健康检查（本文件）
-//	middleware.go        CORS / 访问日志 / 鉴权（注入 account_id）
+//	middleware.go        CORS / 访问日志 / panic 兜底 / 鉴权（注入 account）
 //	respond.go           统一 JSON 响应与错误码常量
 //	auth.go              无状态 token 的签发与校验（HMAC-SHA256）
 //	handlers_auth.go     发送验证码、登录/自动注册、当前账号、埋点
@@ -85,12 +85,17 @@
 //	POST  /api/admin/translate-keys/{id}/test    试译：用这把 Key 翻一句，验证可用性与质量
 //	GET   /api/admin/audit                       管理操作日志（超管全量；租户管理员看本租户）
 //
+// 未列出的 /api 路径统一走兜底（见 Routes() 末尾的 apiNotFound）：
+// 路径不存在返回 404 + NOT_FOUND 信封，方法不匹配返回 405 + Allow 头，
+// 两者都是 JSON——与全部接口共用同一套解包逻辑。
+
 // 注意：所有 /api/stores/{id}/... 路由进入 handler 后的第一件事都是 requireStore，
 // 校验「门店存在 + 你有权访问」（owner，或同租户的租户管理员 / 超管），越权返回 FORBIDDEN。
 package httpapi
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/assist"
 	"github.com/francisfernandez66666/langcross-merchant-app/server/internal/config"
@@ -152,9 +157,11 @@ func (s *Server) WithAssist(eng *assist.Engine, vault *service.AICredVault) *Ser
 // 为什么不用 Web 框架：路由形态简单，标准库的「方法 + 通配符」模式已经够用，
 // 且避免为「10 个语种 + 一条业务链路」引入框架级复杂度。
 //
-// 中间件包裹顺序为 withLog(withCORS(mux))：
-//   - withLog 在最外层，才能覆盖包括 CORS 预检与鉴权失败在内的所有请求；
-//   - withCORS 在内层，负责给真实响应加跨域头。
+// 中间件包裹顺序为 withLog(withRecover(withCORS(mux)))：
+//   - withLog 在最外层，才能覆盖包括 CORS 预检、panic 恢复与鉴权失败在内的所有请求；
+//   - withRecover 在中间，把任何 handler 的 panic 转成 500 信封（见 middleware.go），
+//     并保证恢复后的请求仍被 withLog 记录；
+//   - withCORS 在最内层，负责给真实响应（含恢复出的 500）加跨域头。
 //
 // 完整路由表见本文件顶部的包注释。
 func (s *Server) Routes() http.Handler {
@@ -231,21 +238,67 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/uploads/", imgHandler)
 	mux.HandleFunc("HEAD /api/uploads/", imgHandler)
 
-	return withLog(s.withCORS(mux))
+	// ── 兜底：未知 /api 路径与方法不匹配 ──
+	// Go mux 的默认行为是未注册路径返回纯文本 "404 page not found"、
+	// 「路径对但方法错」返回纯文本 "405 method not allowed"——两者都破坏
+	// 「所有 /api 响应都是 JSON 信封」的契约：前端的统一解包会在这里
+	// 解析失败，错误分支全部失效（2026-10-19 字节级 UAT 实证）。
+	//
+	// 这里挂两个方法无关的模式收口（Go 1.22 mux 语义）：
+	//   - "/api/"  子树兜底：所有未命中的 /api/* 请求都会落到它——
+	//     方法特定查找失败后，mux 才会尝试方法无关的模式，这正是兜底语义；
+	//   - "/api"   精确兜底：避免 /api 被 307 重定向到 /api/ 再走兜底。
+	// 已注册的具体路由不受影响：冲突检测只拒绝「等价或交叠」的模式，
+	// 而具体路由在路径与方法两个维度上都更具体，优先命中。
+	//
+	// 只兜 /api 前缀是刻意的：非 /api 路径不属于 API 契约（本进程是纯
+	// API 服务，前端由 vite / 静态服务器 Serve），且将来若在本进程挂
+	// SPA，根路径兜底会与 index.html 回退冲突，故留给 Go 默认行为。
+	notFound := s.apiNotFound(mux, fallbackPatterns)
+	mux.Handle("/api/", notFound)
+	mux.Handle("/api", notFound)
+
+	return withLog(s.withRecover(s.withCORS(mux)))
 }
 
 // handleHealth 健康检查：对外暴露服务名，以及 OCR / 翻译的就绪状态与当前模式。
 //
 // 只报「是否可用 + 走哪条实现」，不泄露任何密钥或内部服务地址。
-// 前端可据此在页面上提示「当前为手动录入模式 / 词典兜底模式」。
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+//
+// ★ 翻译部分的诚实口径（2026-10-19 F-5 修订）：
+//   - translate_engine    配置的主引擎：chain / mymemory / dict（纯配置，零 IO）；
+//   - translate_reachable 主引擎此刻是否应答（懒探测 + 30s TTL）；
+//   - translate_ready     = reachable，即「主引擎真的能用」；
+//   - translate_mode      = live（主引擎在用）/ dict-stub（实际在走内置词典）。
+//
+// 修订前的毛病：装配带 DictTranslator 兜底，Ready() 恒为 true，于是把翻译链
+// 配成黑洞地址（端口没人听）时健康检查照样报 live——运维看到「翻译很健康」，
+// 实际每次翻译都在降级。现在黑洞地址会如实报 reachable=false / mode=dict-stub。
+//
+// dev_mode 一并披露：开发模式走固定验证码 000000、允许弱密钥，运维必须能一眼
+// 看出「这个实例是开发模式，不能对外」（见 config.Load 的 fail-safe 修订）。
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	trReady := s.tr.Ready()
+	trMode := modeName(trReady, "live", "dict-stub")
+	engine, reachable := "", trReady
+	if rep, ok := s.tr.(service.TranslateReporter); ok {
+		engine = rep.TranslateEngine()
+		reachable = rep.TranslateReachable(r.Context())
+		// 只有真正实现自陈接口的翻译链才谈得上「此刻可达」；否则沿用 Ready()
+		// 的旧口径（测试假件 / 自定义注入的实现不受影响）。
+		trReady = reachable
+		trMode = modeName(engine != service.EngineDict && reachable, "live", "dict-stub")
+	}
 	ok(w, map[string]any{
-		"ok":              true,
-		"service":         "langcross-merchant-app",
-		"ocr_ready":       s.ocr.Ready(),
-		"ocr_mode":        modeName(s.ocr.Ready(), "paddleocr", "stub-manual"),
-		"translate_ready": s.tr.Ready(),
-		"translate_mode":  modeName(s.tr.Ready(), "live", "dict-stub"),
+		"ok":                  true,
+		"service":             "langcross-merchant-app",
+		"dev_mode":            s.cfg.DevMode,
+		"ocr_ready":           s.ocr.Ready(),
+		"ocr_mode":            modeName(s.ocr.Ready(), "paddleocr", "stub-manual"),
+		"translate_engine":    engine,
+		"translate_reachable": reachable,
+		"translate_ready":     trReady,
+		"translate_mode":      trMode,
 	})
 }
 
@@ -256,4 +309,61 @@ func modeName(ready bool, live, fallback string) string {
 		return live
 	}
 	return fallback
+}
+
+// fallbackPatterns 是 /api 兜底自身注册的模式串，供 allowedMethods 探测时排除。
+// 与 Routes() 末尾的两行 mux.Handle 一一对应，改兜底注册处必须同步改这里。
+var fallbackPatterns = map[string]bool{"/api/": true, "/api": true}
+
+// apiNotFound 是 /api 未知路径与方法不匹配的统一出口，返回 JSON 信封。
+//
+// 为什么不在 mux 上直接挂一个写死的 404：还要区分「路径不存在」与
+// 「路径存在但方法不对」——后者按 HTTP 语义应是 405 并带 Allow 头，
+// 客户端（与中间件）靠它知道该换什么方法重试。
+//
+// 区分手法（只用 net/http 公开 API，不依赖内部实现）：
+//   - mux.Handler(r) 命中已注册模式时返回非空 pattern，404 与 405 都返回空；
+//   - 再用候选方法逐个克隆请求探一遍 mux.Handler：任一方法能命中即
+//     「路径存在、方法不对」→ 405 + Allow；全部落空才是真·路径不存在 → 404。
+//
+// 405 复用 VALIDATION 码：《数据模型与接口契约_全量》§3 只登记了 8 个
+// 错误码、没有 405 专用码，HTTP 状态已承载方法语义，msg 里给出允许的方法清单。
+//
+// self 是兜底自身注册的模式串（如 {"/api/", "/api"}）：探测时必须排除——
+// 兜底是方法无关的，任何方法都会「命中」它，不排除就永远分不清 404 与 405。
+func (s *Server) apiNotFound(mux *http.ServeMux, self map[string]bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if allowed := allowedMethods(mux, r, self); len(allowed) > 0 {
+			w.Header().Set("Allow", strings.Join(allowed, ", "))
+			fail(w, http.StatusMethodNotAllowed, CodeValidation,
+				"方法不允许：该路径仅支持 "+strings.Join(allowed, ", "))
+			return
+		}
+		fail(w, http.StatusNotFound, CodeNotFound, "接口不存在")
+	})
+}
+
+// allowedMethods 探测「该路径用哪些方法能命中已注册路由」；全部落空返回 nil。
+//
+// 候选集取本应用实际用到的方法（GET/HEAD/POST/PATCH/DELETE）+ OPTIONS；
+// TRACE / CONNECT 不在 API 契约内，刻意不探。
+func allowedMethods(mux *http.ServeMux, r *http.Request, self map[string]bool) []string {
+	candidates := []string{
+		http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions,
+	}
+	var allowed []string
+	for _, m := range candidates {
+		if m == r.Method {
+			continue // 当前方法已确认落空（否则不会进兜底），无需重复探
+		}
+		// Clone 而非 WithContext：需要改方法，且 mux.Handler 承诺不改入参。
+		// Body 是浅拷贝（流无法深拷），但探测路径不读 body，无副作用。
+		probe := r.Clone(r.Context())
+		probe.Method = m
+		if _, pattern := mux.Handler(probe); pattern != "" && !self[pattern] {
+			allowed = append(allowed, m)
+		}
+	}
+	return allowed
 }

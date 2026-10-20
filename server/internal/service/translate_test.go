@@ -17,11 +17,17 @@ type fakeTranslator struct {
 	got  []string // 记录收到的入参，便于断言「缓存命中时不调引擎」
 }
 
+// Translate 实现 Translator：记录收到的入参（缓存测试靠它断言
+// 「命中时没调引擎」），并按预设返回结果或错误。
 func (f *fakeTranslator) Translate(_ context.Context, texts []string, _, _ string) ([]string, error) {
 	f.got = texts
 	return f.out, f.err
 }
-func (f *fakeTranslator) Ready() bool  { return true }
+
+// Ready 恒真：本桩用于行为测试，不参与可达性口径。
+func (f *fakeTranslator) Ready() bool { return true }
+
+// Name 返回预设名，供断言「最终用了哪个引擎」。
 func (f *fakeTranslator) Name() string { return f.name }
 
 // fakeCache 是内存版翻译记忆，行为与 repo 的 translation_cache 表一致。
@@ -36,6 +42,8 @@ func newFakeCache() *fakeCache {
 	return &fakeCache{store: map[string]string{}, saved: map[string]string{}}
 }
 
+// LookupTranslations 实现 TranslationCache：内存命中即返回，
+// 行为与 repo 的 translation_cache 表一致（ miss 返回空 map 而非错误）。
 func (c *fakeCache) LookupTranslations(_ context.Context, from, to string, texts []string) (map[string]string, error) {
 	out := map[string]string{}
 	for _, t := range texts {
@@ -46,6 +54,8 @@ func (c *fakeCache) LookupTranslations(_ context.Context, from, to string, texts
 	return out, nil
 }
 
+// SaveTranslations 实现 TranslationCache：只记录不淘汰，
+// 测试通过 saved 字段断言「什么被回写了 TM」。
 func (c *fakeCache) SaveTranslations(_ context.Context, from, to string, pairs map[string]string, _ string) error {
 	for k, v := range pairs {
 		c.saved[ck(from, to, k)] = v
@@ -142,6 +152,8 @@ func TestFallbackTranslator_NeverReturnsNilSlice(t *testing.T) {
 
 /* ── DictTranslator（离线兜底） ────────────────────────────── */
 
+// 锁定词典的能力边界：只覆盖中→英；其它语种一律留空，
+// 绝不拿英文冒充日语——「留白」比「错译」体面。
 func TestDictTranslator_OnlyCoversChineseToEnglish(t *testing.T) {
 	d := DictTranslator{}
 	// 中→英：命中内置词典
@@ -156,6 +168,8 @@ func TestDictTranslator_OnlyCoversChineseToEnglish(t *testing.T) {
 	}
 }
 
+// 锁定「绝不编造」纪律：未收录词必须返回空串，
+// 由上层标注「未翻译」，而不是猜一个译文。
 func TestDictTranslator_UnknownWordReturnsEmpty(t *testing.T) {
 	d := DictTranslator{}
 	out, _ := d.Translate(context.Background(), []string{"香煎鲈鱼配时蔬"}, "zh", "en")
@@ -246,6 +260,8 @@ func TestNewTranslator_WithCacheKeepsName(t *testing.T) {
 
 /* ── 辅助函数 ─────────────────────────────────────────────── */
 
+// 锁定 normalizeLen 三态：nil 补等长空串、短切片补齐保序、
+// 超长截断。这是所有兜底路径的地基——上层一律按下标取值。
 func TestNormalizeLen(t *testing.T) {
 	if got := normalizeLen(nil, 3); len(got) != 3 || got[0] != "" {
 		t.Errorf("nil 应补成等长空串：%v", got)
@@ -258,6 +274,8 @@ func TestNormalizeLen(t *testing.T) {
 	}
 }
 
+// 锁定 hasEmpty 判定：含空串为 true、无空洞为 false、空切片为 false。
+// 契约：只在 normalizeLen 之后调用，长度已对齐，不存在歧义。
 func TestHasEmpty(t *testing.T) {
 	if hasEmpty([]string{"a", "b"}) {
 		t.Errorf("无空洞时不应判定为 true")

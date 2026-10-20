@@ -56,6 +56,10 @@ function speechSupported(): boolean {
   return typeof window !== 'undefined' && Boolean((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)
 }
 
+/**
+ * 客人端 AI 点菜助手面板组件（抽屉式聊天层，默认导出）。
+ * 完整定位、「提议—确认」纪律与 props 说明见文件头。
+ */
 export default function GuestAssistant({
   slug,
   lang,

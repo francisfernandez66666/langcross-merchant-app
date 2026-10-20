@@ -327,6 +327,7 @@ const UI: Record<string, Row> = {
     vi: 'Chưa có bản dịch — đang hiển thị nguyên văn',
   },
   // 非中文时说明「这是机器翻译」，同时兜底提示可问店员（L5 纪律）
+  // L5 页面级提示（有译文时）：菜单为机器翻译，疑问问店员
   machineNote: {
     zh: '菜单为机器翻译，如有疑问请向店员确认',
     en: 'Machine-translated menu. Please ask our staff if anything is unclear.',
@@ -338,6 +339,20 @@ const UI: Record<string, Row> = {
     de: 'Automatisch übersetzte Speisekarte. Bei Fragen wenden Sie sich bitte an unser Personal.',
     pt: 'Cardápio traduzido automaticamente. Em caso de dúvida, pergunte à equipe.',
     vi: 'Thực đơn dịch tự động. Nếu chưa rõ, vui lòng hỏi nhân viên.',
+  },
+  // L5 页面级提示（一道译文都没有时）：如实说「尚未翻译」而不是「机器翻译」——
+  // 没翻过的菜单说成机器翻译是另一种不诚实（2026-10-19 Q1 补）
+  untranslatedNote: {
+    zh: '本店菜单尚未翻译，以下为中文原文，请向店员确认',
+    en: 'This menu is not translated yet — the original is shown below. Please ask our staff.',
+    ja: 'このメニューはまだ翻訳されていません。以下は原文です。店員にお尋ねください。',
+    ko: '이 메뉴는 아직 번역되지 않았습니다. 아래는 원문입니다. 직원에게 문의하세요.',
+    th: 'เมนูนี้ยังไม่ได้แปล ข้อความด้านล่างเป็นต้นฉบับ โปรดสอบถามพนักงาน',
+    fr: "Ce menu n'est pas encore traduit — l'original est affiché ci-dessous. Veuillez demander au personnel.",
+    es: 'Este menú aún no está traducido: se muestra el original. Consulta al personal.',
+    de: 'Diese Speisekarte ist noch nicht übersetzt – unten steht das Original. Bitte wenden Sie sich an unser Personal.',
+    pt: 'Este cardápio ainda não foi traduzido – abaixo está o original. Pergunte à equipe.',
+    vi: 'Thực đơn này chưa được dịch – bên dưới là nguyên văn. Vui lòng hỏi nhân viên.',
   },
   // 语言选择弹层标题（也用作头部语言按钮的 aria-label）
   chooseLang: {

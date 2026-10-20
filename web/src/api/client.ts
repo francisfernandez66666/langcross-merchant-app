@@ -319,7 +319,18 @@ async function upload<T>(p: string, file: File, field = 'image'): Promise<T> {
  */
 export const api = {
   // ── 健康检查：探测 OCR 与翻译引擎是否就绪 ──
-  health: () => request<{ ocr_ready: boolean; translate_ready: boolean; translate_mode: string }>('/api/health'),
+  // 翻译部分刻意分三层（2026-10-19 修订）：engine 是「配了什么」，reachable 是
+  // 「此刻连得上吗」，mode 是「实际在走哪条路」。只看 ready/mode 会重演「链地址
+  // 配成黑洞却报 live」的谎报（审计 F-5）。
+  health: () => request<{
+    dev_mode: boolean
+    ocr_ready: boolean
+    ocr_mode: string
+    translate_engine: string
+    translate_reachable: boolean
+    translate_ready: boolean
+    translate_mode: string
+  }>('/api/health'),
 
   // ── 认证 ──
   // 发送短信验证码；开发环境返回 dev_code 便于免短信登录

@@ -22,6 +22,8 @@ func respond(e *Engine, q string, facts []Fact) *Reply {
 
 /* ── 第 2 道：话术直配 ─────────────────────────────── */
 
+// 验证专词优先于泛词：「客人端显示未翻译怎么办」同时含泛词「翻译」，必须
+// 命中 untranslated-mark 而非 how-translate，否则答非所问。
 func TestMatchScript_SpecificBeatsGeneric(t *testing.T) {
 	e := newTestEngine()
 	// 「未翻译」同时含泛词「翻译」；专词必须赢，否则答非所问
@@ -34,6 +36,8 @@ func TestMatchScript_SpecificBeatsGeneric(t *testing.T) {
 	}
 }
 
+// 验证专词缺席时泛词话术仍能命中：纯「怎么翻译菜单」类问题应落到
+// how-translate，防止专词优先规则把泛词问题误伤成不命中。
 func TestMatchScript_GenericStillWorks(t *testing.T) {
 	e := newTestEngine()
 	for _, q := range []string{"怎么翻译菜单", "菜单怎么翻成外语"} {
@@ -47,6 +51,8 @@ func TestMatchScript_GenericStillWorks(t *testing.T) {
 	}
 }
 
+// 验证知识库零命中时返回空列表：检索不到就不能拿不相干条目硬凑，
+// 「零命中」是上层选择承认不知道而非硬答的前提。
 func TestRetrieveKB_NoHitReturnsEmpty(t *testing.T) {
 	e := newTestEngine()
 	if hits := e.RetrieveKB("明天天气怎么样适合洗车吗", 5); len(hits) != 0 {
@@ -54,6 +60,8 @@ func TestRetrieveKB_NoHitReturnsEmpty(t *testing.T) {
 	}
 }
 
+// 验证多轮流程的触发识别：「手把手教我Translation一遍」应命中
+// translate-guide 流程并返回流程 key。
 func TestMatchFlow_Triggers(t *testing.T) {
 	e := newTestEngine()
 	key, ok := e.MatchFlow("手把手教我Translation一遍")
@@ -64,6 +72,8 @@ func TestMatchFlow_Triggers(t *testing.T) {
 
 /* ── 第 1 道：多轮流程 ─────────────────────────────── */
 
+// 验证进入 translate-guide 后「下一步」「继续」等推进语应留在流程内
+// 继续走，而不是每一轮都重新匹配意图、把用户打回入口。
 func TestFlow_MultiTurnAdvances(t *testing.T) {
 	e := newTestEngine()
 	ctx := context.Background()
@@ -84,6 +94,8 @@ func TestFlow_MultiTurnAdvances(t *testing.T) {
 	}
 }
 
+// 验证流程进行中遇到新的明确话术问题（「怎么核销优惠券」）应退出流程
+// 并直配回答：引导不能把用户卡死在多轮里。
 func TestFlow_YieldsToNewIntent(t *testing.T) {
 	e := newTestEngine()
 	ctx := context.Background()
@@ -98,6 +110,8 @@ func TestFlow_YieldsToNewIntent(t *testing.T) {
 	}
 }
 
+// 验证流程会话按账号隔离：acc-B 发「下一步」不应继承 acc-A 已进入的
+// translate-guide，多商家共用实例时不能串会话。
 func TestFlow_SessionIsolatedByAccount(t *testing.T) {
 	e := newTestEngine()
 	ctx := context.Background()
@@ -109,6 +123,8 @@ func TestFlow_SessionIsolatedByAccount(t *testing.T) {
 	}
 }
 
+// 验证 SessionStore 抽象的初衷：两个引擎实例共享同一存储时，流程状态
+// 跨实例延续，支撑多实例部署下请求落到不同进程仍能续上。
 func TestFlow_DBStorePersistsAcrossEngineInstances(t *testing.T) {
 	// 同一份 SessionStore、两个引擎实例（模拟多实例部署下的两次请求）
 	store := NewMemorySessionStore()
@@ -136,6 +152,8 @@ func factsWith(vals ...string) []Fact {
 	return out
 }
 
+// 验证出站数字核验：事实里没有的数字（4.8）所在行整行丢弃，注入过的
+// （4.2）保留，常识性白名单数字（10）不误删——回答只能引用注入的事实。
 func TestGuardNumbers_UnauthorizedNumberDropsLine(t *testing.T) {
 	e := newTestEngine()
 	facts := factsWith("4.2")
@@ -154,6 +172,8 @@ func TestGuardNumbers_UnauthorizedNumberDropsLine(t *testing.T) {
 	}
 }
 
+// 验证 fail-soft 边界：未注入任何事实时本腿不判，否则正常回答里的
+// 数字会被删成碎片。
 func TestGuardNumbers_NoFactsSkipsGuard(t *testing.T) {
 	e := newTestEngine()
 	rep := &Reply{Content: "建店只需要一个店名，大约 3 分钟搞定。"}
@@ -163,6 +183,8 @@ func TestGuardNumbers_NoFactsSkipsGuard(t *testing.T) {
 	}
 }
 
+// 验证整段数字都未授权时（只说了编造的 5.0）必须弃用该回答、退回只
+// 陈述注入的事实，编造的数字不得原样露出。
 func TestGuardNumbers_AllDroppedFallsBackToFacts(t *testing.T) {
 	e := newTestEngine()
 	facts := factsWith("4.2")
@@ -176,6 +198,8 @@ func TestGuardNumbers_AllDroppedFallsBackToFacts(t *testing.T) {
 	}
 }
 
+// 验证承诺类措辞（「保证提升客流」）必须被替换，且未命中的行原样不动，
+// 防止助手替商家做效果担保。
 func TestGuardPromises_ReplacesGuaranteeWording(t *testing.T) {
 	e := newTestEngine()
 	rep := &Reply{Content: "用我们翻译，保证提升客流。\n第二行保持原样。"}
@@ -190,6 +214,8 @@ func TestGuardPromises_ReplacesGuaranteeWording(t *testing.T) {
 
 /* ── 兜底：绝不编造 ────────────────────────────────── */
 
+// 验证无话术、无知识命中的不相干问题走 fallback 且明说「还不确定」，
+// 绝不编一个答案。
 func TestFallback_UnrelatedQuestionAdmitsUnknown(t *testing.T) {
 	e := newTestEngine()
 	r := respond(e, "明天天气怎么样适合洗车吗", nil)
@@ -201,6 +227,8 @@ func TestFallback_UnrelatedQuestionAdmitsUnknown(t *testing.T) {
 	}
 }
 
+// 验证数据类问题（「有多少扫码」）在 fallback 路径应给出注入的事实值
+// 12，让商家看到真实口径的数据。
 func TestFallback_DataQuestionGetsFacts(t *testing.T) {
 	e := newTestEngine()
 	r := respond(e, "我家店现在有多少扫码", factsWith("12"))
@@ -212,6 +240,8 @@ func TestFallback_DataQuestionGetsFacts(t *testing.T) {
 	}
 }
 
+// 回归点：「怎么样」曾被当成数据向关键词，导致天气问题也倒一整套事实
+// 清单；验证非数据类问题不得倾倒口径说明。
 func TestFallback_UnrelatedQuestionDoesNotDumpFacts(t *testing.T) {
 	e := newTestEngine()
 	// 回归测试：早期「怎么样」被当成数据向关键词，天气问题也倒一整套事实
@@ -221,6 +251,8 @@ func TestFallback_UnrelatedQuestionDoesNotDumpFacts(t *testing.T) {
 	}
 }
 
+// 验证空白问题返回引导语而非空回复：trim 后为空时仍走 fallback 且内容
+// 非空，防止前端渲染出空气泡。
 func TestRespond_EmptyQuestionGetsHint(t *testing.T) {
 	e := newTestEngine()
 	r := respond(e, "   ", nil)
@@ -231,6 +263,8 @@ func TestRespond_EmptyQuestionGetsHint(t *testing.T) {
 
 /* ── 事实构造 ─────────────────────────────────────── */
 
+// 验证统计值转事实的排序与文本化：按 key 排序保证提示词可复现，小数
+// 保留一位、整数不带小数点，否则提示词里的数字每次生成都不一样。
 func TestFactsFromStats_SortedAndTextified(t *testing.T) {
 	facts := FactsFromStats(map[string]any{"b": 2, "a": 1.5, "c": "x"})
 	if len(facts) != 3 {
@@ -248,6 +282,8 @@ func TestFactsFromStats_SortedAndTextified(t *testing.T) {
 	}
 }
 
+// 表格驱动锁定 formatValue 的类型映射：float 整数去小数点、小数留一位、
+// 布尔转「是/否」、字符串原样，任何类型的文本化口径都不能漂移。
 func TestFormatValue_IntegersHaveNoDecimalPoint(t *testing.T) {
 	cases := []struct {
 		in   any

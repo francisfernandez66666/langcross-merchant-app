@@ -54,7 +54,7 @@ else
   echo "  ✗ psql 提权失败（数据库不可达？），终止"; exit 1
 fi
 
-echo "── 3. 重新登录拿新 token（角色烘焙进 token，必须重登才生效） ──"
+echo "── 3. 重新登录拿 token（角色不烘焙进 token：载荷仅 {sub,exp}，每请求回库读取，改角色即时生效） ──"
 SUP=$(login "$SUP_PHONE" | jq 'd["token"]')
 MGR=$(login "$MGR_PHONE" | jq 'd["token"]')
 ne "超管 token 非空" "$SUP"

@@ -180,6 +180,20 @@ func NewTenantPrimary(vault *KeyVault, inner Translator) *TenantPrimary {
 // 真正的「能言是否可用」由 HasAnyKey 单独回答，不混在这里。
 func (t *TenantPrimary) Ready() bool { return true }
 
+// TranslateEngine 报次级引擎（既有链 / MyMemory）。
+//
+// ★ 诚实边界：能言是按「请求里的租户」解析 Key 后才用的（见 Translate），
+// 健康检查没有租户上下文，无法判断某租户有没有 Key。因此这里报的是
+// **保底路径**——即「一个没配 Key 的租户此刻能用的引擎」。
+// 有 Key 的租户走能言，能言失败也会回落到这条路径，所以它的可达性
+// 就是翻译能力的地板：地板塌了才是真事故。
+func (t *TenantPrimary) TranslateEngine() string { return engineOf(t.Inner) }
+
+// TranslateReachable 问次级引擎的可达性（理由见 TranslateEngine 的注释）。
+func (t *TenantPrimary) TranslateReachable(ctx context.Context) bool {
+	return reachableOf(ctx, t.Inner)
+}
+
 // Name 报告次级引擎名：本实现在无请求上下文时无法判断租户有没有 Key，
 // 因此这里给保守答案；前端看到的真实引擎以 /api/health 的字段为准。
 func (t *TenantPrimary) Name() string {

@@ -1,4 +1,4 @@
-.PHONY: help db api web build smoke smoke-offline render-check test reset reset-all clean
+.PHONY: help db api web build smoke smoke-offline render-check test doc-comments reset reset-all clean
 
 help:
 	@echo "LangCross 商家店端 · 常用命令"
@@ -10,7 +10,7 @@ help:
 	@echo "    make build          构建后端二进制 + 前端静态产物"
 	@echo ""
 	@echo "  测试（需先起后端；渲染回归另需前端 dev server）"
-	@echo "    make test           Go 单测 + 前端类型检查（CI 用，不需要服务）"
+	@echo "    make test           Go 单测 + 前端类型检查 + 注释门禁（CI 用，不需要服务）"
 	@echo "    make smoke          端到端冒烟测试（在线翻译引擎）"
 	@echo "    make smoke-offline  离线兜底冒烟测试（需另起 :8099 降级后端）"
 	@echo "    make render-check   客人端渲染回归（真开浏览器，查语言纪律）"
@@ -26,11 +26,11 @@ db:
 	createdb langcross 2>/dev/null || echo "数据库 langcross 已存在"
 
 api:
-	cd server && go run ./cmd/api
+	cd server && LC_DEV=1 go run ./cmd/api
 
 # 离线降级后端：翻译链指向黑洞地址，用于确定性验证内置词典兜底
 api-offline:
-	cd server && LC_ADDR=:8099 LC_TRANSLATE_URL=http://127.0.0.1:9 go run ./cmd/api
+	cd server && LC_ADDR=:8099 LC_DEV=1 LC_TRANSLATE_URL=http://127.0.0.1:9 go run ./cmd/api
 
 web:
 	cd web && npm run dev
@@ -45,6 +45,11 @@ build:
 test:
 	cd server && gofmt -l ./internal ./cmd && go vet ./... && go test ./...
 	cd web && npx tsc --noEmit
+	python3 tools/check_doc_comments.py
+
+# 导出面文档注释门禁（棘轮）：新导出符号不补中文注释就 exit 1
+doc-comments:
+	python3 tools/check_doc_comments.py
 
 smoke:
 	bash server/scripts/smoke.sh

@@ -19,7 +19,8 @@
  *      + 弱化斜体（`.gx-pending-text`）+ 原文小字位置换成提示语（`.gx-dish-orig--hint`）。
  *      这三处全部由 `title(d).ok === false` 驱动，是 `{text, ok}` 返回值的唯一用途。
  *   L4 绝不编造：没有译文就留空、回落原文并标注，不许塞占位符或拿原文冒充译文。
- *   L5 非中文时必须标注「机器翻译」（`.gx-note`），见下方 `machineNote` 那行。
+ *   L5 非中文时必须标注「机器翻译」（`.gx-note`）；一道译文都没有时改标
+ *      「尚未翻译，展示原文」（untranslatedNote）——没翻说成翻了是不诚实。
  *   L6 不用 `text-transform: uppercase`（很多语种会破坏字形）——样式约束，勿加。
  *
  * 另外必须同步两处浏览器级元信息：
@@ -329,8 +330,16 @@ export default function StorePage() {
         </section>
       )}
 
-      {/* L5：非中文且确有菜单内容时，明确告知「机器翻译，疑问问店员」 */}
-      {lang !== 'zh' && dishes.length > 0 && <p className="gx-note">{t('machineNote', lang)}</p>}
+      {/* L5：非中文且确有菜单内容时，明确告知「机器翻译，疑问问店员」。
+          ★ 2026-10-19 Q1：一道译文都没有时不能说「机器翻译」——如实告知
+          「尚未翻译，展示的是原文」。没翻说成翻了，是另一种不诚实。 */}
+      {lang !== 'zh' && dishes.length > 0 && (
+        <p className="gx-note">
+          {dishes.some((d) => Object.values(d.names ?? {}).some((v) => v))
+            ? t('machineNote', lang)
+            : t('untranslatedNote', lang)}
+        </p>
+      )}
 
       {/* 底部固定操作条：AI 点菜助手（首选） / 问店员（无网兜底） / 评价领券（主转化）。
           三个按钮在窄屏下各占一份宽度，文案已尽量短，必要时可换行。 */}

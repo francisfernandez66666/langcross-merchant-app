@@ -30,6 +30,8 @@ func TestRoleLevelOrdering(t *testing.T) {
 	}
 }
 
+// 验证租户可用性判定只有 active 一种状态可用：disabled、expired、空串
+// 都不可用，过期或被停用的租户不得继续被放行服务。
 func TestTenantIsUsable(t *testing.T) {
 	if !(&Tenant{Status: TenantActive}).IsUsable() {
 		t.Error("active 应可用")
@@ -41,6 +43,8 @@ func TestTenantIsUsable(t *testing.T) {
 	}
 }
 
+// 验证翻译档位白名单只有 fast / pro：未登记的模式必须被拒，防止脏值
+// 一路传到能言平台才失败。
 func TestKeyModeValidation(t *testing.T) {
 	if !ValidKeyMode(KeyModeFast) || !ValidKeyMode(KeyModePro) {
 		t.Error("fast / pro 应合法")

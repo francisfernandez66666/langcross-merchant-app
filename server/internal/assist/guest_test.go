@@ -2,6 +2,9 @@ package assist
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -78,12 +81,28 @@ func TestGuestFallback_ReturnsHits(t *testing.T) {
 	}
 }
 
+// 验证检索不到候选时客人端兜底必须诚实说 not sure，不能把不相干的菜品
+// 硬推给客人。
 func TestGuestFallback_UnknownAdmits(t *testing.T) {
 	e := New()
 	kb := NewStoreKB(sampleStore(), sampleDishes(), "en", "英语", "¥")
 	rep := e.guestFallback(GuestAskInput{KB: kb}, "what is the meaning of life")
 	if !strings.Contains(rep.Content, "not sure") {
 		t.Errorf("答不上来应诚实承认, 实际: %q", rep.Content)
+	}
+}
+
+// 兜底引导语必须跟随客人语种（渲染纪律 L1 对助手兜底路径同样生效）：
+// 曾硬编码中文，英文客人会看到半中半英的回答——2026-10-19 修。
+func TestGuestFallback_IntroFollowsGuestLang(t *testing.T) {
+	e := New()
+	en := e.guestFallback(GuestAskInput{KB: NewStoreKB(sampleStore(), sampleDishes(), "en", "英语", "¥")}, "do you have mapo doufu")
+	if !strings.HasPrefix(en.Content, "Here's what might match") {
+		t.Errorf("英文客人的兜底引导语应为英文, 实际: %q", en.Content)
+	}
+	zh := e.guestFallback(GuestAskInput{KB: NewStoreKB(sampleStore(), sampleDishes(), "zh", "中文", "¥")}, "有没有麻婆豆腐")
+	if !strings.HasPrefix(zh.Content, "菜单里这些可能相关") {
+		t.Errorf("中文客人应保持中文引导语, 实际: %q", zh.Content)
 	}
 }
 
@@ -139,5 +158,106 @@ func TestRespondGuest_EmptyQuestion(t *testing.T) {
 	rep := e.RespondGuest(context.Background(), GuestAskInput{Question: "   ", KB: kb, LLM: LLMConfig{}})
 	if rep == nil || rep.Content == "" {
 		t.Fatal("空问题应返回引导语")
+	}
+}
+
+/* ── guardNoRawChineseName：未翻译菜不许露原名 ─────────────────
+   2026-10-19 审计实证：这一腿原先「定义了却没接进出站链」（死代码），
+   且判据拿 AllowedNames() 做差集——该集合包含未翻译菜自己的别名，
+   差集恒为空，接了也永不触发。现已修判据（未翻译别名 − 当前语言已译名）
+   并接在 guardCitedDishes 之后。 */
+
+// dishesWithUntranslated 在样例菜单上加一道「有日文译名、无英文译名」的菜，
+// 构造英文界面下的「未翻译」态（NameLang=false，Name 回落中文原名）。
+func dishesWithUntranslated() []domain.Dish {
+	pv := func(v float64) *float64 { return &v }
+	out := append([]domain.Dish{}, sampleDishes()...)
+	return append(out, domain.Dish{
+		ID: "d_sour", NameZh: "酸辣汤", Names: map[string]string{"ja": "サンラータン"}, Price: pv(18),
+	})
+}
+
+// 未翻译菜的中文原名出现 → 整行丢弃；同段的已译名行不受影响。
+func TestGuardNoRawChineseName_DropsLeakedLine(t *testing.T) {
+	e := New()
+	kb := NewStoreKB(sampleStore(), dishesWithUntranslated(), "en", "英语", "¥")
+	rep := &Reply{Content: "We have 酸辣汤, it's great.\nMapo doufu is also good."}
+	out := e.guardNoRawChineseName(rep, kb)
+	if strings.Contains(out.Content, "酸辣汤") {
+		t.Errorf("未翻译菜的中文原名应被丢弃, 实际: %q", out.Content)
+	}
+	if !strings.Contains(out.Content, "Mapo doufu") {
+		t.Errorf("已译名行应保留, 实际: %q", out.Content)
+	}
+}
+
+// 整段都在泄露 → 不能把带原文的回答留给客人，应回落诚实提示。
+func TestGuardNoRawChineseName_AllLeakFallsBackToHint(t *testing.T) {
+	e := New()
+	kb := NewStoreKB(sampleStore(), dishesWithUntranslated(), "en", "英语", "¥")
+	rep := &Reply{Content: "推荐 酸辣汤。\n今天的 酸辣汤 特别好喝。"}
+	out := e.guardNoRawChineseName(rep, kb)
+	if strings.Contains(out.Content, "酸辣汤") {
+		t.Errorf("全泄露时不应留下任何原文, 实际: %q", out.Content)
+	}
+	if !strings.Contains(out.Content, "not sure") {
+		t.Errorf("全泄露应回落诚实提示, 实际: %q", out.Content)
+	}
+}
+
+// 碰撞逃生口：同一串既是未翻译菜的别名、又是另一道菜的当前语言已译名时，
+// 它是合法内容，不能删（否则会误删正常回答）。
+func TestGuardNoRawChineseName_TranslatedNameWinsOverAlias(t *testing.T) {
+	e := New()
+	dishes := append([]domain.Dish{}, sampleDishes()...)
+	// A：英文译名恰好叫「酸辣汤」（合法已译名）
+	dishes = append(dishes, domain.Dish{ID: "d_a", NameZh: "甲汤", Names: map[string]string{"en": "酸辣汤"}})
+	// B：未翻译（无英文译名），中文原名也是「酸辣汤」
+	dishes = append(dishes, domain.Dish{ID: "d_b", NameZh: "酸辣汤", Names: map[string]string{"ja": "サンラータン"}})
+	kb := NewStoreKB(sampleStore(), dishes, "en", "英语", "¥")
+
+	rep := &Reply{Content: "Today's special is 酸辣汤."}
+	out := e.guardNoRawChineseName(rep, kb)
+	if !strings.Contains(out.Content, "酸辣汤") {
+		t.Errorf("该串同时是已译名, 应保留, 实际: %q", out.Content)
+	}
+}
+
+// 没有未翻译菜时本腿不动作（正常菜单零误伤）。
+func TestGuardNoRawChineseName_NoUntranslatedNoOp(t *testing.T) {
+	e := New()
+	kb := NewStoreKB(sampleStore(), sampleDishes(), "en", "英语", "¥")
+	rep := &Reply{Content: "Kung Pao Chicken is ¥38."}
+	out := e.guardNoRawChineseName(rep, kb)
+	if out.Content != rep.Content {
+		t.Errorf("无未翻译菜时不应改动回答, 实际: %q", out.Content)
+	}
+}
+
+// 端到端接线验证：假 LLM 故意露未翻译菜的中文原名，
+// RespondGuest 的出站链必须把它拦下（证明这一腿真接进了链上）。
+func TestRespondGuest_LLMLeakIsGuarded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"content": "推荐 酸辣汤，很好喝。"}}},
+		})
+	}))
+	defer srv.Close()
+
+	e := New()
+	kb := NewStoreKB(sampleStore(), dishesWithUntranslated(), "en", "英语", "¥")
+	rep := e.RespondGuest(context.Background(), GuestAskInput{
+		Question: "what soup do you have",
+		KB:       kb,
+		LLM:      LLMConfig{BaseURL: srv.URL, APIKey: "k", Model: "m"},
+	})
+	if rep.Source != "llm" {
+		t.Fatalf("假 LLM 应被调用, 实际走了 %s", rep.Source)
+	}
+	if strings.Contains(rep.Content, "酸辣汤") {
+		t.Errorf("LLM 泄露的未翻译菜中文原名应被守卫拦下, 实际: %q", rep.Content)
+	}
+	if !strings.Contains(rep.Content, "not sure") {
+		t.Errorf("唯一一行被拦下后应回落诚实提示, 实际: %q", rep.Content)
 	}
 }

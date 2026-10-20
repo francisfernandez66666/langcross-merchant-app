@@ -361,8 +361,8 @@ func (k *StoreKB) FormatService() string {
 		b.WriteString("优惠：" + s.Coupon + "\n")
 	}
 	if s.WiFiSSID != "" {
-		// 密码只在客人明确问起时给（见 guardReplyWifi），因此这里只给账号名，
-		// 并提示模型「问起再答」。
+		// 密码不随提示词下发：整份【门店服务】都会进上下文，而密码只在客人
+		// 明确问起时才该出现。这里只给账号名，并提示模型「问起再答」。
 		b.WriteString("WiFi 名称：" + s.WiFiSSID + "（密码仅在客人明确询问时提供）\n")
 	}
 	return b.String()

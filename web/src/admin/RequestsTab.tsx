@@ -80,6 +80,11 @@ function RequestRow({
   )
 }
 
+/**
+ * 商家端服务请求看板组件（挂在本店控制台的「服务」Tab 下）。
+ * 定位、轮询策略与交互细节见文件头；本组件只负责呈现与状态切换，
+ * 数据全部来自 GET /api/stores/{id}/requests。
+ */
 export default function RequestsTab({ store }: { store: Store }) {
   const [status, setStatus] = useState<'open' | ''>('open') // 默认待办
   const [reqs, setReqs] = useState<GuestRequest[]>([])

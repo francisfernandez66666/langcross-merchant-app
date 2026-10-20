@@ -17,9 +17,17 @@
 //   +  语言选择器必须列出后端注册表里的全部 10 个语种
 //   +  切语言后主标题跟着换
 //   +  评价弹层能打开且**没有 JS 异常**（上面那个 P0 的回归测试）
+//   +  底部三个按钮（AI 助手 / 问店员 / 评价领券）身份各自正确
+//   +  AI 助手面板可打开、提问后有真实回复气泡（2026-10-19 补）
+//
+// ★ 2026-10-19 修订记录（git 98e5bf3 加了 AI 助手 primary 钮，本脚本没同步）：
+//   底部钮从 2 个变 3 个、评价钮不再是 .gx-btn--primary、各浮层关闭钮形态
+//   不统一（.gx-x / .gx-btn--block / .gx-assist-icon）——旧选择器直接抛
+//   TypeError。现在一律按**文案**找钮、用 closeOverlays() 关浮层。
 //
 // 前置：
-//   1. 后端在跑（默认 http://localhost:8080）
+//   1. 后端在跑（默认 http://localhost:8080），且必须以 LC_DEV=1 开发模式启动——
+//      登录走固定验证码 000000（2026-10-19 起 LC_DEV 默认关闭，`make api` 已带上）
 //   2. 前端 dev server 在跑（默认 http://localhost:5173，vite 会把 /api 代理到后端）
 //   3. 本机有 Chrome / Chromium（默认用 Playwright 缓存的 Chrome for Testing，
 //      可用 CHROME 环境变量覆盖）
@@ -174,12 +182,14 @@ async function api(path, { method = 'GET', token, body } = {}) {
   return r.json()
 }
 
-/** 建两家店，覆盖 L1（有译文）与 L3（缺译文）两条纪律。
+/** 建三家店，覆盖 L1（有译文）与 L3（缺译文）两条纪律，外加 Q1 的零译文态。
  *
- *  ★ 坑：`dish` 行是在**翻译时**才落库的。一家完全没翻过译的店，
- *    客人端拿到的是空菜单，根本测不到「缺译文」态。
- *    所以「缺译文」夹具的正确做法是：只翻 en，然后用 ko 去看
- *    —— 菜都在，只是没有 ko 译文，于是走原文 + 「未翻译」标。
+ *  ★ 口径已变（2026-10-19 Q1）：**确认即落库**，dish 行不再等翻译时才写。
+ *    所以现在三种夹具都能直接造：
+ *      - 有译文   ：翻 en/ja，用 en 看                       → 测 L1
+ *      - 缺译文   ：只翻 en，用 ko 看（菜在、ko 没译文）      → 测 L3
+ *      - 零译文   ：只确认、一道都没翻                        → 测 Q1
+ *    （Q1 之前第三种是空菜单，测不到东西，只能靠前两种间接覆盖。）
  */
 async function seedFixtures() {
   await api('/api/auth/otp', { method: 'POST', body: { phone: PHONE } })
@@ -217,8 +227,61 @@ async function seedFixtures() {
   return {
     translated: await make('', ['en', 'ja']), // 有 en/ja 译文 —— 测 L1
     missing: await make('缺译文', ['en']), // 只有 en —— 用 ko 看就是缺译文态，测 L3
+    // ★ Q1（2026-10-19）后新增的关键路径：confirm 即落库原文菜，于是
+    // 「只确认、还没翻译」的店客人端也有菜单——但一道译文都没有。
+    // 这个态必须渲染「原文 + 未翻译标 + 未翻译提示」，绝不能空菜单。
+    untranslated: await make('零译文', []),
   }
 }
+
+/** 商家端夹具：一个**只拥有一家零译文店**的独立账号。
+ *
+ * 为什么另开手机号：多店账号会渲染门店切换器（<select>，受控组件要用原生
+ * setter 才能驱动），单店账号则自动选中唯一门店——少一层脆断言。
+ *
+ * @returns {Promise<{token: string, sid: string}>} 登录 token 与门店 id
+ */
+async function seedMerchantFixture() {
+  const phone = process.env.MERCHANT_PHONE || '13800000009'
+  await api('/api/auth/otp', { method: 'POST', body: { phone } })
+  const login = await api('/api/auth/login', { method: 'POST', body: { phone, code: '000000' } })
+  if (!login.token) throw new Error(`商家端登录失败：${JSON.stringify(login)}`)
+
+  const created = await api('/api/stores', {
+    method: 'POST',
+    token: login.token,
+    body: { name: '渲染测试店零译文' },
+  })
+  const sid = created.store.id
+  await api(`/api/stores/${sid}/draft`, {
+    method: 'POST',
+    token: login.token,
+    body: {
+      lang: 'zh',
+      items: [
+        { name: '宫保鸡丁', price: 38, category: '热菜', selected: true },
+        { name: '麻婆豆腐', price: 32, category: '热菜', selected: true },
+      ],
+    },
+  })
+  await api(`/api/stores/${sid}/draft/confirm`, {
+    method: 'POST',
+    token: login.token,
+    body: {},
+  })
+  return { token: login.token, sid }
+}
+
+/* ── 商家端探针（与客人端 PROBE 分开：DOM 结构完全不同） ────── */
+const ADMIN_PROBE = `(() => {
+  const txt = (el) => (el ? el.textContent.trim() : null)
+  return {
+    ready: !!document.querySelector('.admin-shell'),
+    login: !!document.querySelector('.lc-center input.lc-input'),
+    tabs: Array.from(document.querySelectorAll('.admin-nav button')).map((b) => b.textContent.trim()),
+    banner: txt(document.querySelector('.lc-alert--warn')),
+  }
+})()`
 
 /* ── 页面探针：在浏览器里执行，返回可断言的结构 ────────────────── */
 const PROBE = `(() => {
@@ -270,10 +333,11 @@ async function main() {
     }
   }
 
-  step('1) 造测试数据（一家有译文 / 一家只有部分译文）')
+  step('1) 造测试数据（一家有译文 / 一家只有部分译文 / 一家零译文）')
   const fx = await seedFixtures()
   ok(`有译文店：/s/${fx.translated.slug}`)
   ok(`缺译文店：/s/${fx.missing.slug}`)
+  ok(`零译文店：/s/${fx.untranslated.slug}`)
 
   const { proc, wsUrl } = await launchChrome()
   const cdp = await CDP.connect(wsUrl)
@@ -304,6 +368,34 @@ async function main() {
     }
     throw new Error(`页面未渲染完成：${url}`)
   }
+
+  /* ── 浮层与底部按钮的通用操作 ──────────────────────────────
+     各浮层关闭钮形态不统一（2026-10-19 实证）：
+       RateSheet / HelpSheet / LangSheet → .gx-sheet .gx-x
+       CouponSheet                      → .gx-sheet .gx-btn--block（券层也是 .gx-sheet！）
+       GuestAssistant（AI 面板）        → .gx-assist .gx-assist-icon（最后一个 ✕）
+     底部按钮按**文案**认身份，不按 --primary/--ghost——
+     primary 在 98e5bf3 之后是 AI 助手，评价领券是含 coupon 文案的 ghost 钮。 */
+  const closeOverlays = () =>
+    evaluate(`(() => {
+      const icons = document.querySelectorAll('.gx-assist .gx-assist-icon')
+      if (icons.length) { icons[icons.length - 1].click(); return 'assist' }
+      const x = document.querySelector('.gx-sheet .gx-x')
+      if (x) { x.click(); return 'sheet-x' }
+      const block = document.querySelector('.gx-sheet .gx-btn--block')
+      if (block) { block.click(); return 'coupon-block' }
+      return 'none'
+    })()`)
+
+  // re 必须是**正则字面量字符串**（如 '/coupon/i'）——它会被原样嵌进页面代码
+  const clickBarButton = (re, label) =>
+    evaluate(`(() => {
+      const btns = Array.from(document.querySelectorAll('.gx-bar .gx-btn'))
+      const hit = btns.find((b) => ${re}.test(b.textContent))
+      if (!hit) throw new Error('底部找不到「${label}」钮，现有：' + btns.map((b) => b.textContent.trim()).join(' | '))
+      hit.click()
+      return hit.textContent.trim()
+    })()`)
 
   /* ── L1 / L4 / L5：有译文时的渲染纪律 ─────────────────────── */
   step('2) 有译文店 · ?lang=en（L1 主标题＝目标语言）')
@@ -338,8 +430,13 @@ async function main() {
   // ★ L5：机器翻译必须标注
   eq('非 zh 时标注「机器翻译」', true, Boolean(view.note))
   soft('分类标题也走目标语言', !view.cats.some(hasCJK))
-  eq('底部两个动作按钮都在', 2, view.bar.length)
   soft('标签页标题用目标语言的「菜单」', /menu/i.test(view.title))
+  // 底部操作条：AI 助手（primary）/ 问店员 / 评价领券 三个钮，按文案认身份
+  // （2026-10-19：曾断言 2 个，98e5bf3 加 AI 助手后实际 3 个）
+  eq('底部三个动作按钮都在', 3, view.bar.length)
+  eq('含 AI 点菜助手钮', true, view.bar.some((t) => /AI/i.test(t)))
+  eq('含问店员钮', true, view.bar.some((t) => /need help/i.test(t)))
+  eq('含评价领券钮', true, view.bar.some((t) => /coupon/i.test(t)))
 
   /* ── L3：缺译文时必须标注、且绝不编造 ─────────────────────── */
   step('3) 缺译文店 · ?lang=ko（L3 缺译文显示原文 + 未翻译标）')
@@ -354,6 +451,18 @@ async function main() {
   eq('每道菜都挂「未翻译」标', raw.dishNames.length, raw.pendingNames)
   eq('缺译文用弱化斜体样式', raw.dishNames.length, raw.pendingTexts)
   eq('缺译文时原文小字换成提示语', raw.dishNames.length, raw.origHints)
+
+  /* ── Q1 核心场景：零译文店（只确认、未翻译） ──────────────────
+     2026-10-19 之前 dish 行只在翻译时才落库，这种店客人端是**空菜单**；
+     Q1 改为确认即落库原文菜，因此这里必须看到「原文 + 未翻译」而不是空。 */
+  step('3.5) 零译文店 · ?lang=en（Q1：确认即有菜单，未翻译如实标注）')
+  const none = await goto(`${WEB}/s/${fx.untranslated.slug}?lang=en&ref=door`)
+  eq('data-lang = en', 'en', none.dataLang)
+  eq('★ 菜品非空（不再空菜单）', 4, none.dishNames.length)
+  eqJSON('主标题回落为中文原文', ['宫保鸡丁', '麻婆豆腐', '酸辣汤', '蛋炒饭'], none.dishNames)
+  eq('每道菜挂「未翻译」标', 4, none.pendingNames)
+  eq('提示语如实说「尚未翻译」（而非机器翻译）', true, /not translated yet/i.test(none.note || ''))
+  eq('无 JS 异常', 0, jsErrors.length)
 
   /* ── 切语言 ─────────────────────────────────────────────── */
   step('4) 切语言：选择器 10 项 + 切换后主标题跟着换')
@@ -397,7 +506,8 @@ async function main() {
   step('5) ★ P0 回归：评价弹层能打开且不抛异常')
   await goto(`${WEB}/s/${fx.translated.slug}?lang=en&ref=t01`)
   const before = await evaluate(`document.querySelectorAll('.gx-sheet').length`)
-  await evaluate(`document.querySelector('.gx-bar .gx-btn--primary').click()`)
+  // ★ 评价钮按文案找（含 coupon）：primary 钮现在是 AI 助手（2026-10-19）
+  await clickBarButton('/coupon/i', '评价领券')
   await sleep(400)
   const rate = await evaluate(`(() => ({
     sheets: document.querySelectorAll('.gx-sheet').length,
@@ -413,9 +523,12 @@ async function main() {
 
   /* ── 问店员卡（离线可用，不依赖网络） ─────────────────────── */
   step('6) 问店员短语卡')
-  await evaluate(`document.querySelector('.gx-sheet .gx-x').click()`)
+  // 关掉第 5 步打开的评价层。★ 不能再直接点 .gx-sheet .gx-x：万一开着的是
+  // 券层（关闭钮是 .gx-btn--block）或助手面板（.gx-assist-icon），旧写法会抛
+  // TypeError 把整个脚本打断——2026-10-19 实证过的崩溃路径。
+  eq('浮层已关闭', true, (await closeOverlays()) !== 'none')
   await sleep(250)
-  await evaluate(`document.querySelector('.gx-bar .gx-btn--ghost').click()`)
+  await clickBarButton('/need help/i', '问店员')
   await sleep(350)
   const help = await evaluate(`(() => {
     const ps = Array.from(document.querySelectorAll('.gx-phrase'))
@@ -429,6 +542,123 @@ async function main() {
   eq('短语主文案不是中文', true, !help.mains.some(hasCJK))
   eq('短语都带中文对照（给店员看）', true, help.zh.every((t) => t.trim().length > 0))
   eq('全程无 JS 异常', 0, jsErrors.length)
+
+  /* ── AI 点菜助手：面板可打开、提问后有真实回复 ─────────────
+     2026-10-19 补：98e5bf3 把 AI 助手提成 primary 钮后，本脚本一次都没验过它。
+     回复走「无 LLM → 规则兜底」路径（后端未配凭据），因此是确定性的：
+     提问里带完整菜名（检索口径：问题须包含别名整串）必然命中。 */
+  step('7) AI 点菜助手：面板可打开、提问后有回复')
+  eq('浮层已关闭', true, (await closeOverlays()) !== 'none')
+  await sleep(200)
+  await clickBarButton('/AI/i', 'AI 点菜助手')
+  await sleep(400)
+  const panel = await evaluate(`(() => ({
+    open: !!document.querySelector('.gx-assist'),
+    title: (document.querySelector('.gx-assist-title') || {}).textContent || '',
+  }))()`)
+  eq('AI 助手面板已打开', true, panel.open)
+  eq('助手标题用目标语言（含 AI 字样）', true, /AI/i.test(panel.title))
+
+  // React 受控 textarea：必须走原生 setter + input 事件，直接赋值不生效
+  await evaluate(`(() => {
+    const ta = document.querySelector('.gx-assist-input')
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+    setter.call(ta, 'do you have mapo doufu')
+    ta.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await evaluate(`document.querySelector('.gx-assist-send').click()`)
+  // 先出现「Thinking…」占位，回答回来后替换——轮询到最后一条助手气泡非占位
+  let reply = ''
+  for (let i = 0; i < 40; i++) {
+    await sleep(250)
+    reply = await evaluate(`(() => {
+      const bs = Array.from(document.querySelectorAll('.gx-msg--assistant .gx-bubble'))
+      const last = bs[bs.length - 1]
+      return last ? last.textContent.trim() : ''
+    })()`).catch(() => '')
+    if (reply && !/^Thinking/i.test(reply)) break
+  }
+  eq('提问后收到真实回复（非占位）', true, reply.length > 0 && !/^Thinking/i.test(reply))
+  soft('回复提及菜单里的菜（规则兜底命中检索）', /mapo doufu/i.test(reply))
+  eq('助手交互全程无 JS 异常', 0, jsErrors.length)
+  await closeOverlays()
+
+  /* ── Q1 下半场：商家端的「未翻译提醒」横幅 ─────────────────
+     客人端验完还不够：确认即落库之后，商家可能以为「已经有菜单 = 已经上线」，
+     于是必须有一条显眼提醒告诉他「一道译文都没有」。这是纯前端逻辑
+     （覆盖率全 0 才弹），接口层测不到，只能真开浏览器。 */
+  step('8) 商家端：未翻译提醒横幅（Q1：提醒商户账户）')
+  const mfx = await seedMerchantFixture()
+
+  // 进商家端：先把 token 写进 localStorage（键名 lc_token，见 api/client.ts），
+  // 再跳 /admin。比点登录页稳——登录页是两个受控输入框，UI 一改就断。
+  await cdp.send('Page.navigate', { url: `${WEB}/admin` })
+  await sleep(400)
+  await evaluate(`localStorage.setItem('lc_token', ${JSON.stringify(mfx.token)})`)
+  await cdp.send('Page.navigate', { url: `${WEB}/admin` })
+  let admin = null
+  for (let i = 0; i < 60; i++) {
+    await sleep(150)
+    admin = await evaluate(ADMIN_PROBE).catch(() => null)
+    if (admin?.ready) break
+  }
+  eq('token 注入后进入商家控制台', true, Boolean(admin?.ready))
+  eq('门店级 Tab 齐全（概览/菜单/券与核销…）', true, (admin?.tabs || []).includes('菜单'))
+
+  // 该手机号可能已有多家店（跑过多次 / 别的脚本造的），控制台默认选**第一家**，
+  // 不一定是本次造的零译文店。多店时才渲染 <select>，用原生 setter 切到目标店
+  // （React 受控 select 直接赋值会被它的 value tracker 吞掉）。
+  await evaluate(`(() => {
+    const sel = document.querySelector('.lc-select')
+    if (!sel) return 'no-switcher'
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+    setter.call(sel, ${JSON.stringify(mfx.sid)})
+    sel.dispatchEvent(new Event('change', { bubbles: true }))
+    return 'switched'
+  })()`)
+  await sleep(300)
+
+  // 点「菜单」Tab（按文案找，不按序号——平台角色会少几个 Tab）
+  await evaluate(`(() => {
+    const b = Array.from(document.querySelectorAll('.admin-nav button')).find((x) => x.textContent.trim() === '菜单')
+    if (!b) throw new Error('找不到「菜单」Tab')
+    b.click()
+  })()`)
+  await sleep(500)
+  const warn = await evaluate(ADMIN_PROBE)
+  eq('★ 零译文店弹出未翻译提醒', true, /还没有任何译文/.test(warn.banner || ''))
+  eq('提醒里指路「补充语种」', true, /补充语种/.test(warn.banner || ''))
+
+  // 反向：补翻一个语种后刷新，提醒必须消失（避免提醒疲劳）
+  await api(`/api/stores/${mfx.sid}/translate`, {
+    method: 'POST',
+    token: mfx.token,
+    body: { targets: ['en'] },
+  })
+  await cdp.send('Page.navigate', { url: `${WEB}/admin` })
+  await sleep(600)
+  for (let i = 0; i < 40; i++) {
+    admin = await evaluate(ADMIN_PROBE).catch(() => null)
+    if (admin?.ready) break
+    await sleep(150)
+  }
+  await evaluate(`(() => {
+    const sel = document.querySelector('.lc-select')
+    if (sel) {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+      setter.call(sel, ${JSON.stringify(mfx.sid)})
+      sel.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+  })()`)
+  await sleep(300)
+  await evaluate(`(() => {
+    const b = Array.from(document.querySelectorAll('.admin-nav button')).find((x) => x.textContent.trim() === '菜单')
+    if (b) b.click()
+  })()`)
+  await sleep(500)
+  const after = await evaluate(ADMIN_PROBE)
+  eq('补翻后提醒消失（不打扰已上线的商家）', false, /还没有任何译文/.test(after.banner || ''))
+  eq('商家端交互全程无 JS 异常', 0, jsErrors.length)
 
   /* ── 收尾 ─────────────────────────────────────────────────── */
   cdp.close()

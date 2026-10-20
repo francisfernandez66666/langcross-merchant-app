@@ -19,6 +19,8 @@ type fakeKeyStore struct {
 	failOnGet bool
 }
 
+// ActiveTranslationKey 实现 TranslationKeyStore：每次调用都计数，
+// 缓存测试靠这个数字判定「有没有少查库」。
 func (f *fakeKeyStore) ActiveTranslationKey(_ context.Context, _ string) (*domain.TranslationKey, error) {
 	atomic.AddInt32(&f.calls, 1)
 	if f.key == nil {
@@ -27,6 +29,8 @@ func (f *fakeKeyStore) ActiveTranslationKey(_ context.Context, _ string) (*domai
 	return f.key, nil
 }
 
+// KeyCiphertext 实现 TranslationKeyStore：failOnGet 时模拟读库失败，
+// 用来验证解密失败必须向上抛且不进缓存。
 func (f *fakeKeyStore) KeyCiphertext(_ context.Context, _ string, _ string) ([]byte, error) {
 	if f.failOnGet {
 		return nil, errors.New("boom")
@@ -43,6 +47,8 @@ type stubTranslator struct {
 	holes bool // 是否在结果里留空洞（模拟「有值但没翻全」）
 }
 
+// Translate 实现 Translator：按预设 out 逐行回填，holes=true 时
+// 把第一句挖空——模拟「能言有响应但没翻全」的部分失败场景。
 func (s *stubTranslator) Translate(_ context.Context, texts []string, _, _ string) ([]string, error) {
 	atomic.AddInt32(&s.calls, 1)
 	if s.err != nil {
@@ -60,7 +66,10 @@ func (s *stubTranslator) Translate(_ context.Context, texts []string, _, _ strin
 	return out, nil
 }
 
-func (s *stubTranslator) Ready() bool  { return true }
+// Ready 恒真：本假件只关心 TenantPrimary 的降级决策，不模拟不可达。
+func (s *stubTranslator) Ready() bool { return true }
+
+// Name 返回预设名，供断言「最终用了哪个引擎」。
 func (s *stubTranslator) Name() string { return s.name }
 
 func newTestVault(t *testing.T, store TranslationKeyStore) *KeyVault {

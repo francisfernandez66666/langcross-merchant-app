@@ -48,6 +48,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -64,10 +65,100 @@ import (
 //   - Ready：报告该实现当前是否真的可用，用于启动日志与健康判断；
 //     注意它只反映「配置是否齐全」，不代表网络此刻可达。
 //   - Name：引擎标识，用于日志与 TM 回写时记录 provider。
+//
+// 「此刻可达」另有专门的接口回答：TranslateReporter（见下）。之所以不把
+// 探测并进 Ready：Ready 在每次翻译的装配路径上都会被问（便宜、无 IO），
+// 而探测要发网络请求，只有健康检查这种低频运维动作才付得起这个代价。
 type Translator interface {
 	Translate(ctx context.Context, texts []string, from, to string) ([]string, error)
 	Ready() bool
 	Name() string
+}
+
+/* ── 翻译链自陈：配置是什么 + 此刻可达吗 ─────────────────── */
+
+// TranslateReporter 是翻译链的可选自陈接口（NewTranslatorWithKeys 的返回值实现它）。
+//
+// 存在理由（2026-10-19 字节级 UAT 的 F-5）：翻译链地址配成黑洞（端口没人听）
+// 时，装配照样成功、Ready() 照样为 true，于是 /api/health 报 live——运维
+// 看到的是「翻译很健康」，实际每一次翻译都在降级到内置词典。健康检查必须
+// 区分「配了」与「连得上」，这两件事只有探测能分开。
+type TranslateReporter interface {
+	// TranslateEngine 返回配置的主引擎标识：chain（自建翻译链）/ mymemory（公开 API）/
+	// dict（仅内置词典）。它是纯配置的，不产生任何 IO。
+	TranslateEngine() string
+	// TranslateReachable 返回主引擎实时可达性。懒探测 + TTL 缓存：
+	// 只在被调用时探测一次，结果缓存 reachTTL（见 reachCache），
+	// 不占后台 goroutine、不随进程生命周期摇摆。
+	TranslateReachable(ctx context.Context) bool
+}
+
+// 引擎标识常量，供 /api/health 的 translate_engine 字段对外输出。
+const (
+	EngineChain    = "chain"    // 自建翻译链（LC_TRANSLATE_URL）
+	EngineMyMemory = "mymemory" // MyMemory 公开 API（本地开发）
+	EngineDict     = "dict"     // 仅内置词典（无外部引擎）
+	EngineLexicorn = "lexicorn" // 能言平台（租户级 Key，按请求解析）
+)
+
+// 可达性探测参数。
+//
+// reachTTL 为什么是 30s：健康检查是低频运维动作（人工 curl / 负载均衡探活），
+// TTL 把它压到「最多每 30s 一次真实探测」，既不会像后台定时任务那样占
+// goroutine（测试里会泄漏、优雅停机要多等一轮），又能及时反映宕机。
+//
+// reachTimeout 为什么是 2s：探活要快，宁可判「不可达」也不让健康检查挂住；
+// 黑洞地址（连接被拒 / 被防火墙丢包）通常在毫秒级或超时后失败。
+const (
+	reachTTL     = 30 * time.Second
+	reachTimeout = 2 * time.Second
+)
+
+// reachCache 收敛「懒探测 + TTL」的通用骨架：TTL 内的旧结果直接复用，
+// 过期则现场探测并写回。
+//
+// 并发口径：探测在锁外执行——慢探测不该阻塞其它健康检查请求；最坏情况是
+// 并发多打一次幂等的只读请求，结果照写，不影响正确性。mu 只保护时间戳与结果。
+type reachCache struct {
+	mu sync.Mutex
+	at time.Time
+	ok bool
+}
+
+// get 返回缓存内的探测结果，或在过期时调 probe 现场探测。
+func (c *reachCache) get(probe func() bool) bool {
+	c.mu.Lock()
+	at, ok := c.at, c.ok
+	c.mu.Unlock()
+	if !at.IsZero() && time.Since(at) < reachTTL {
+		return ok
+	}
+	ok = probe()
+	c.mu.Lock()
+	c.at, c.ok = time.Now(), ok
+	c.mu.Unlock()
+	return ok
+}
+
+// engineOf 取内层实现的引擎标识。纯配置读取，不产生任何 IO——
+// 引擎名不该为了报个名字就去探测一次网络。
+//
+// 没实现 TranslateReporter 的实现（多为测试假件）按 dict 回落：本地词典
+// 恒可用，这个答案不会让健康检查说谎。
+func engineOf(t Translator) string {
+	if r, ok := t.(TranslateReporter); ok {
+		return r.TranslateEngine()
+	}
+	return EngineDict
+}
+
+// reachableOf 问内层实现的可达性（懒探测 + TTL）。没实现自陈接口的实现
+// 按「本地词典恒可达」回落。
+func reachableOf(ctx context.Context, t Translator) bool {
+	if r, ok := t.(TranslateReporter); ok {
+		return r.TranslateReachable(ctx)
+	}
+	return true
 }
 
 /* ── 1) 既有翻译链（生产首选） ────────────────────────────── */
@@ -77,6 +168,8 @@ type Translator interface {
 type HTTPTranslator struct {
 	BaseURL string       // 翻译链根地址，如 http://translate.internal:9000
 	Client  *http.Client // 复用连接池的 HTTP 客户端（含超时）
+
+	probe reachCache // 可达性探测的懒缓存（见 TranslateReachable）
 }
 
 // NewHTTPTranslator 构造 HTTP 翻译客户端。
@@ -87,6 +180,34 @@ func NewHTTPTranslator(base string) *HTTPTranslator {
 
 // Ready 报告翻译链地址是否已配置（非空即视为就绪）。
 func (h *HTTPTranslator) Ready() bool { return h.BaseURL != "" }
+
+// TranslateEngine 报告本实现是自建翻译链。
+func (h *HTTPTranslator) TranslateEngine() string { return EngineChain }
+
+// TranslateReachable 探测自建链此刻是否应答（懒探测 + 30s TTL）。
+func (h *HTTPTranslator) TranslateReachable(ctx context.Context) bool {
+	if h.BaseURL == "" {
+		return false // 没配地址 = 没有可达的链，诚实报不可达
+	}
+	return h.probe.get(func() bool {
+		cctx, cancel := context.WithTimeout(ctx, reachTimeout)
+		defer cancel()
+		// HEAD {base}/api/translation：只要拿到任何 HTTP 应答（哪怕是
+		// 404/405，说明 HEAD 不被该路由支持）就证明服务活着；连接被拒、
+		// 超时、DNS 失败才是不可达。用 HEAD 而非真实 POST 是为了零成本——
+		// 探活不该消耗翻译链的配额，也不该在对方日志里留下一串垃圾请求。
+		req, err := http.NewRequestWithContext(cctx, http.MethodHead, h.BaseURL+"/api/translation", nil)
+		if err != nil {
+			return false
+		}
+		resp, err := h.Client.Do(req)
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return true
+	})
+}
 
 // Name 返回引擎标识，用于日志与 TM 回写记录 provider。
 func (h *HTTPTranslator) Name() string { return "langcross-chain" }
@@ -134,6 +255,8 @@ type MemoryTranslator struct {
 	Client *http.Client
 	Email  string        // 可选：填了配额更高
 	Delay  time.Duration // 请求间隔，避免触发限流
+
+	probe reachCache // 可达性探测的懒缓存
 }
 
 // NewMemoryTranslator 构造 MyMemory 客户端。
@@ -149,6 +272,30 @@ func NewMemoryTranslator(email string) *MemoryTranslator {
 
 // Ready 恒为 true：MyMemory 是公开接口，无需额外配置即可用。
 func (m *MemoryTranslator) Ready() bool { return true }
+
+// TranslateEngine 报告本实现走 MyMemory 公开 API。
+func (m *MemoryTranslator) TranslateEngine() string { return EngineMyMemory }
+
+// TranslateReachable 探测 MyMemory 此刻是否应答（懒探测 + 30s TTL）。
+func (m *MemoryTranslator) TranslateReachable(ctx context.Context) bool {
+	return m.probe.get(func() bool {
+		cctx, cancel := context.WithTimeout(ctx, reachTimeout)
+		defer cancel()
+		// 发一个单词的极小请求：MyMemory 的免费额度足够，一个词不值一提，
+		// 换来的是「这条链路真的能翻」而不是「主机 ping 得通」。
+		u := "https://api.mymemory.translated.net/get?q=ping&langpair=en%7Ces"
+		req, err := http.NewRequestWithContext(cctx, http.MethodGet, u, nil)
+		if err != nil {
+			return false
+		}
+		resp, err := m.Client.Do(req)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	})
+}
 
 // Name 返回引擎标识，用于日志与 TM 回写记录 provider。
 func (m *MemoryTranslator) Name() string { return "mymemory" }
@@ -240,6 +387,12 @@ type DictTranslator struct{}
 // Ready 恒为 true：词典内嵌在二进制里，不依赖任何外部服务。
 func (DictTranslator) Ready() bool { return true }
 
+// TranslateEngine 报告本实现只有内置词典。
+func (DictTranslator) TranslateEngine() string { return EngineDict }
+
+// TranslateReachable 恒为 true：词典内嵌在二进制里，不需要网络探测。
+func (DictTranslator) TranslateReachable(context.Context) bool { return true }
+
 // Name 返回引擎标识，用于日志与 TM 回写记录 provider。
 func (DictTranslator) Name() string { return "builtin-dict" }
 
@@ -318,6 +471,14 @@ func (c *CachedTranslator) Ready() bool { return c.inner.Ready() }
 // Name 透传内层引擎标识，保证日志 / TM provider 反映真实引擎而非「cache」。
 func (c *CachedTranslator) Name() string { return c.inner.Name() }
 
+// TranslateEngine 透传内层引擎标识（缓存不改变引擎形态）。
+func (c *CachedTranslator) TranslateEngine() string { return engineOf(c.inner) }
+
+// TranslateReachable 透传内层可达性（缓存命中不影响「引擎是否活着」）。
+func (c *CachedTranslator) TranslateReachable(ctx context.Context) bool {
+	return reachableOf(ctx, c.inner)
+}
+
 // Translate 先查 TM，再对未命中部分调内层引擎，最后回写新译文。
 //
 // 关键口径：
@@ -382,6 +543,15 @@ func (f *FallbackTranslator) Ready() bool { return f.primary.Ready() || f.fallba
 
 // Name 返回主引擎标识：对外呈现的是主引擎，兜底只在内部生效。
 func (f *FallbackTranslator) Name() string { return f.primary.Name() }
+
+// TranslateEngine 报主引擎——对外呈现的是主引擎，兜底不参与对外形态。
+func (f *FallbackTranslator) TranslateEngine() string { return engineOf(f.primary) }
+
+// TranslateReachable 问主引擎的可达性：主引擎连不上才是「实际在走词典」，
+// 兜底词典本身永远可达，若把它算进来，健康检查会永远报 live（F-5 的老毛病）。
+func (f *FallbackTranslator) TranslateReachable(ctx context.Context) bool {
+	return reachableOf(ctx, f.primary)
+}
 
 // Translate 先跑主引擎，再按需用兜底补齐空洞。
 //

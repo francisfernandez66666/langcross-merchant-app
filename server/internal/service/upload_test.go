@@ -12,6 +12,9 @@ import (
 // pngMagic 是最小合法 PNG 头（8 字节签名），足以骗过魔数嗅探。
 var pngMagic = []byte("\x89PNG\r\n\x1a\n")
 
+// 锁定图片嗅探边界：五种合法格式（png/jpeg/gif87a/gif89a/webp）按魔数
+// 识别；exe、XML、空内容一律拒绝。扩展名与 Content-Type 都不可信，
+// 唯一依据是文件自己的头几个字节。
 func TestSniffImageAcceptAndReject(t *testing.T) {
 	cases := []struct {
 		name string
@@ -36,6 +39,8 @@ func TestSniffImageAcceptAndReject(t *testing.T) {
 	}
 }
 
+// 锁定本地图片存储主链路：Save 真落盘并返回 /api/uploads/ 前缀的 URL，
+// Delete 后文件消失且重复删除幂等。
 func TestLocalImageStoreSaveAndDelete(t *testing.T) {
 	dir := t.TempDir()
 	store := NewLocalImageStore(dir)

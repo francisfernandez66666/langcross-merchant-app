@@ -1,7 +1,9 @@
-// 本文件：HTTP 中间件 —— 跨域（CORS）、访问日志与鉴权。
+// 本文件：HTTP 中间件 —— 跨域（CORS）、访问日志、panic 兜底与鉴权。
 //
-// 包裹顺序为 withLog(withCORS(mux))，见 router.go 的 Routes：
-// 日志在最外层（覆盖所有请求），CORS 在内层（给真实响应加跨域头），
+// 包裹顺序为 withLog(withRecover(withCORS(mux)))，见 router.go 的 Routes：
+// 日志在最外层（覆盖所有请求，含 panic 恢复后的请求），
+// panic 兜底在中间（任何 handler 的 panic 都在这里转成 500 信封），
+// CORS 在内层（给真实响应加跨域头），
 // 鉴权则不是全局中间件，而是按路由逐个包 s.withAuth——因为客人端接口必须公开。
 package httpapi
 
@@ -9,6 +11,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -58,6 +61,70 @@ func withLog(next http.Handler) http.Handler {
 		start := time.Now()
 		next.ServeHTTP(w, r)
 		log.Printf("%-6s %-40s %s", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
+	})
+}
+
+// recoverWriter 包装 ResponseWriter，跟踪「响应是否已开始写入」。
+//
+// 为什么需要它：panic 可能发生在 handler 已经写出一部分响应之后
+// （例如流式写 JSON 时序列化失败）。此时若再调用 fail() 补一个 500，
+// net/http 会记录 superfluous WriteHeader，把两段响应拼在一起发给客户端。
+// 有了 wrote 标记，withRecover 就能按「响应是否已开始」分流：
+// 未开始才补信封，已开始则只记日志。
+type recoverWriter struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+// WriteHeader 透传状态码，并标记「响应已开始」——
+// 状态行一旦提交，之后若发生 panic 就只能记日志，不能再补 500 信封。
+func (w *recoverWriter) WriteHeader(status int) {
+	w.wrote = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+// Write 透传响应体，同样标记「响应已开始」：
+// 有些 handler 不显式调 WriteHeader，直接写体——写出任意字节即视为响应已开始。
+func (w *recoverWriter) Write(b []byte) (int, error) {
+	w.wrote = true
+	return w.ResponseWriter.Write(b)
+}
+
+// Unwrap 暴露被包装的 ResponseWriter（Go 1.20+ 的 http.NewResponseController 约定）：
+// handler 若通过 ResponseController 做 Flush / Hijack，能透过包装层找到原始 Writer。
+func (w *recoverWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// withRecover 兜住 handler 的 panic，转成 500 + INTERNAL 信封。
+//
+// 为什么必须有：net/http 的默认行为是「panic 会中断该连接所在的 goroutine」。
+// 没有这一层时，任何 handler 的 panic（空指针、map 并发写、类型断言……）
+// 都会让连接被直接断开——客户端看到的是空响应或 connection reset，
+// 拿不到错误码、无法走统一错误分支，也无法安全重试；
+// 服务端日志也只有一段没有上下文的 goroutine dump。
+//
+// 位置在 withLog 之内、withCORS 之外：panic 从 handler 向上抛，在本层被接住
+// 并转成正常返回，最外层 withLog 仍能记下这次请求的耗时，日志链路不断。
+// 放在 withCORS 外面还保证：恢复出的 500 同样带上跨域头——
+// 浏览器端的 fetch 收到的是 JSON 错误信封，而不是一个 CORS 错误。
+//
+// ★ 只兜「意外 panic」，业务错误一律走 fail()，与本中间件无关。
+func (s *Server) withRecover(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rw := &recoverWriter{ResponseWriter: w}
+		defer func() {
+			if rec := recover(); rec != nil {
+				// %v 往往只有一行（如 "runtime error: invalid memory address"），
+				// 定位必须靠 debug.Stack() 的调用栈，所以两段都打。
+				log.Printf("PANIC %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+				if !rw.wrote {
+					// 响应尚未开始：补标准失败信封，客户端可据此走统一错误分支
+					fail(w, http.StatusInternalServerError, CodeInternal, "服务内部错误")
+				}
+				// 已写出一半的响应无法补救（HTTP 状态行早已提交），
+				// 此时只记日志，连接由 net/http 收尾。
+			}
+		}()
+		next.ServeHTTP(rw, r)
 	})
 }
 

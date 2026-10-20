@@ -12,6 +12,10 @@
 # 需要**确定性**验证离线内置词典兜底与「绝不编造」纪律时，请跑：
 #   bash scripts/smoke_offline.sh
 #
+# ★ 前置的后端必须以开发模式启动（LC_DEV=1）：登录走固定验证码 000000。
+#   2026-10-19 起 LC_DEV 默认关闭（fail-safe），`make api` 已自动带上；
+#   手工启动记得写全：LC_DEV=1 go run ./cmd/api
+#
 # 用法：BASE=http://localhost:8080 bash scripts/smoke.sh
 # 退出码：0 = 全部通过；1 = 存在失败断言
 # ─────────────────────────────────────────────────────────────
@@ -46,6 +50,15 @@ step "1) 健康检查"
 H=$(curl -s "$B/api/health")
 eq "服务在线" "True" "$(echo "$H" | J 'd["ok"]')"
 echo "     OCR=$(echo "$H" | J 'd["ocr_mode"]')  翻译=$(echo "$H" | J 'd["translate_mode"]')"
+# ★ Q2（2026-10-19 用户拍板）：健康检查必须分开说「配了什么引擎」与「此刻连得上吗」。
+# 修订前只看装配态（Ready() 恒真，因为装配自带词典兜底），把指向黑洞地址的
+# 翻译链也报成 live——运维看到「翻译很健康」，实际每次翻译都在降级。
+ne "报出配置的主引擎" "$(echo "$H" | J 'd["translate_engine"]')"
+eq "主引擎可达（本实例在线）" "True" "$(echo "$H" | J 'd["translate_reachable"]')"
+eq "主引擎在用 → mode=live" "live" "$(echo "$H" | J 'd["translate_mode"]')"
+# dev_mode 只断言「字段存在」而不是取值：本脚本既跑开发实例也跑生产实例，
+# 但运维必须能读到这个字段（它决定验证码是否固定、密钥是否允许弱值）。
+ne "dev_mode 字段对外可见" "$(echo "$H" | J 'str(d["dev_mode"])')"
 
 step "2) 语种注册表（前端语种选择器的唯一真值）"
 L=$(curl -s "$B/api/translation/langs")
@@ -100,6 +113,19 @@ step "8) 确认原文（P3，一次确认即生效）"
 eq "确认成功" "True" \
   "$(curl -s -X POST "$B/api/stores/$SID/draft/confirm" -H "Authorization: Bearer $TOKEN" \
      -H 'Content-Type: application/json' -d '{}' | J 'd["ok"]')"
+
+# ★ Q1（2026-10-19 用户拍板）：确认即把原文菜品落库。
+# 修订前 dish 行只在翻译时才写，「已确认但还没翻译」的店在客人端是**空菜单**——
+# 商家以为上线了，客人扫出来一片空白。现在确认即有菜单，未翻译只是 names 为空，
+# 客人端渲染成「原文 + 未翻译标」并如实提示「尚未翻译」。
+CONFIRMED=$(curl -s "$B/api/stores/$SID/dishes" -H "Authorization: Bearer $TOKEN")
+eq "★ 确认即落库：菜品数 = 4（只落勾选的）" "4" "$(echo "$CONFIRMED" | J 'str(len(d["dishes"]))')"
+eq "未勾选的菜不落库（水煮鱼）" "False" \
+  "$(echo "$CONFIRMED" | J 'any(d.get("name_zh")=="水煮鱼" for d in d["dishes"])')"
+eq "未翻译时 names 为空（客人端回落原文 + 未翻译标）" "True" \
+  "$(echo "$CONFIRMED" | J 'all(not (d.get("names") or {}) for d in d["dishes"])')"
+eq "name_zh 已落库为原文真值" "True" \
+  "$(echo "$CONFIRMED" | J 'all(d.get("name_zh") for d in d["dishes"])')"
 
 step "9) 多语化（P4，只翻勾选的菜；一次 5 个语种）"
 T=$(curl -s -X POST "$B/api/stores/$SID/translate" -H "Authorization: Bearer $TOKEN" \

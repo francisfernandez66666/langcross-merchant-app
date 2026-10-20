@@ -67,6 +67,36 @@ func (r *Repo) GetLatestDraft(ctx context.Context, storeID string) (*domain.Sour
 	return &d, nil
 }
 
+// GetDraftByID 按 ID 取一份确认稿（必须属于该店，否则 ErrNotFound）。
+//
+// 与 GetLatestDraft 的分工：确认接口允许显式指定 draft_id（前端可传版本号），
+// 而「确认即落库菜品」（2026-10-19 Q1）必须读**被确认那一稿**的条目——
+// 落错稿的后果是「商家确认的菜单」与「客人看到的菜单」不是同一份。
+func (r *Repo) GetDraftByID(ctx context.Context, storeID, draftID string) (*domain.SourceDraft, error) {
+	var (
+		d       domain.SourceDraft
+		payload []byte
+		conf    sql.NullTime
+	)
+	err := r.DB.QueryRowContext(ctx,
+		`SELECT id, store_id, lang, payload_json, confirmed_at, created_at
+		 FROM source_draft WHERE id = $1 AND store_id = $2`, draftID, storeID).
+		Scan(&d.ID, &d.StoreID, &d.Lang, &payload, &conf, &d.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(payload, &d.Items); err != nil {
+		return nil, fmt.Errorf("unmarshal draft payload: %w", err)
+	}
+	if conf.Valid {
+		d.ConfirmedAt = &conf.Time
+	}
+	return &d, nil
+}
+
 // ConfirmDraft 标记确认稿已确认（唯一真值生效，之后才允许翻译）。
 //
 // 只置 confirmed_at = now()，不改动 payload。WHERE 同时带 id 与 store_id，

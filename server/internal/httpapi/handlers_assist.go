@@ -168,7 +168,9 @@ func (s *Server) handleAssistClear(w http.ResponseWriter, r *http.Request) {
 //
 // 账号没有租户（平台级超管）时按平台级凭据解析（tenantID 为空串正好命中
 // repo 里的 tenant_id = ” 分支），因此这里不需要特判。
-// 拿不到凭据时返回零值——LLMConfig.Enabled() 为 false，
+// acc 为 nil（客人端匿名请求：没有账号可解析租户）同样返回零值——
+// 引擎走确定性兜底；给客人接租户级凭据是修订计划里的后续项（FIX-7）。
+// 拿不到凭据时也返回零值——LLMConfig.Enabled() 为 false，
 // 引擎自动走确定性兜底，商家仍能得到「话术直配 / 知识库」级别的回答。
 func (s *Server) llmConfig(ctx context.Context, acc *domain.Account) assist.LLMConfig {
 	if s.aiCred == nil || acc == nil {

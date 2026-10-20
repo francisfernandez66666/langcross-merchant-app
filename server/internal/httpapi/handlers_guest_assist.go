@@ -175,7 +175,7 @@ func (s *Server) handleGuestAssist(w http.ResponseWriter, r *http.Request) {
 		SessionID: sid,
 		Question:  q,
 		KB:        kb,
-		LLM:       s.llmConfig(r.Context(), nil), // 租户维度：超管维护的平台级 / 租户级凭据
+		LLM:       s.llmConfig(r.Context(), nil), // ★ 当前未接线：客人是匿名的、没有账号，故传 nil → 走规则兜底；租户级 LLM 凭据接线见修订计划 FIX-7
 	})
 	if rep == nil {
 		fail(w, http.StatusInternalServerError, CodeInternal, "助手没有给出回答")

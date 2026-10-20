@@ -1,0 +1,41 @@
+.ad-wrap {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: #111111;
+  padding: 16px;
+}
+
+.ad-title {
+  font-size: 18px;
+  font-weight: 500;
+  color: #faf9f7;
+  padding-bottom: 14px;
+}
+
+.ad-empty {
+  padding: 40px 0;
+  align-items: center;
+}
+
+.ad-empty-txt {
+  font-size: 13px;
+  color: #8a8880;
+}
+
+/* ★ 替代原 table/tr/td 的 flex 行 */
+.ad-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  padding: 14px 12px;
+  margin-bottom: 8px;
+  border-radius: 10px;
+  background: #1c1c1a;
+}
+
+.ad-row-txt {
+  flex: 1;
+  font-size: 14px;
+  color: #faf9f7;
+}

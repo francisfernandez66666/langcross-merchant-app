@@ -119,6 +119,7 @@ a { color: inherit; }
 .lc-alert { padding: 12px 14px; border-radius: var(--lc-radius-sm); font-size: 14px; border: 1px solid; }
 .lc-alert--err { background: rgba(230, 57, 70, .1); border-color: var(--lc-accent); color: #ff9aa2; }
 .lc-alert--info { background: var(--lc-surface-2); border-color: var(--lc-border); color: var(--lc-text-2); }
+.lc-alert--warn { background: rgba(245, 166, 35, .12); border-color: var(--lc-warn); color: var(--lc-warn); }
 .warm .lc-alert--err { color: var(--lc-accent); }
 
 /* ── 步骤条（引导流） ────────────────────── */

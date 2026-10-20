@@ -55,6 +55,12 @@ type APIError struct {
 	RetryAfter int    // 429 时的建议等待秒数；0 表示未提供
 }
 
+// Error 实现 error 接口，把平台错误码 / 状态码 / 文案拼成一行。
+//
+// 刻意带上 code 与 status：日志与测试断言里光看 Message 分不清是
+// 「余额不足」还是「Key 失效」，拼上 code 后一眼可辨。
+// nil 接收返回 "<nil>" 而不是 panic——调用方经常直接打印 err，
+// 一个 nil *APIError 被当成 error 传递时不该把程序带崩。
 func (e *APIError) Error() string {
 	if e == nil {
 		return "<nil>"
@@ -120,6 +126,8 @@ type LexicornTranslator struct {
 
 	PollInterval time.Duration // 轮询间隔；零值用 LexicornTextPollInterval
 	MaxWait      time.Duration // 最长等待；零值用 LexicornMaxWait
+
+	probe reachCache // 可达性探测的懒缓存（见 TranslateReachable）
 }
 
 // NewLexicornTranslator 构造能言翻译客户端。
@@ -143,6 +151,31 @@ func NewLexicornTranslator(baseURL, apiKey, mode string) *LexicornTranslator {
 
 // Ready 只有拿到了 Key 才算就绪（配置是否齐全，不代表网络此刻可达）。
 func (l *LexicornTranslator) Ready() bool { return l.APIKey != "" }
+
+// TranslateEngine 报告本实现是能言平台。
+func (l *LexicornTranslator) TranslateEngine() string { return EngineLexicorn }
+
+// TranslateReachable 探测能言平台此刻是否应答（懒探测 + 30s TTL）。
+// 没有 Key 直接判不可达——拿不到 Key 就没法调用，探到平台活着也没意义。
+func (l *LexicornTranslator) TranslateReachable(ctx context.Context) bool {
+	if l.APIKey == "" {
+		return false
+	}
+	return l.probe.get(func() bool {
+		cctx, cancel := context.WithTimeout(ctx, reachTimeout)
+		defer cancel()
+		req, err := http.NewRequestWithContext(cctx, http.MethodHead, l.BaseURL+"/", nil)
+		if err != nil {
+			return false
+		}
+		resp, err := l.Client.Do(req)
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return true
+	})
+}
 
 // Name 返回引擎标识，用于日志、健康检查与 TM 回写时的 provider。
 func (l *LexicornTranslator) Name() string { return "lexicorn" }

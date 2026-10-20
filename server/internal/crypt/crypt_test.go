@@ -9,6 +9,8 @@ import (
 // testSecret 故意用一个像样的长串：真实部署里 LC_SECRET 就是这么长。
 const testSecret = "langcross-dev-secret-please-change-in-prod"
 
+// 验证加解密往返一致：同一把密文器加密后的凭据必须原样解回，这是
+// KeyVault 存取商家翻译 Key 的地基。
 func TestEncryptDecryptRoundTrip(t *testing.T) {
 	c, err := NewCipher(testSecret)
 	if err != nil {
@@ -77,6 +79,8 @@ func TestDecryptRejectsGarbage(t *testing.T) {
 	}
 }
 
+// 验证脱敏口径：长串留头尾各 4 位、过短整串打星，且脱敏结果不得泄漏
+// 中段明文——日志里的 Key 必须既认得出又抄不走。
 func TestMask(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"", ""},

@@ -135,7 +135,15 @@ func (s *Server) handleCreateStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st, err := s.repo.CreateStore(r.Context(), acc.ID, acc.TenantID, acc.OrgID, strings.TrimSpace(req.Name), idgen.Slug())
+	// ★ 归属口径走 effectiveTenant 而不是 acc.TenantID（2026-10-19 Q3 修订）：
+	// 平台超管的 tenant_id 是空串（平台级账号），直接拿它当门店归属会写出
+	// 一条「无主门店」——它不属于任何租户，所有按租户的查询都看不见它，
+	// 而它又占着 slug 和二维码。0007 给 store.tenant_id 加了外键后，空串
+	// 会直接被数据库拒掉变成 500，所以这里必须落到真实租户：超管显式传
+	// ?tenant_id 时用之，否则落默认租户。
+	// 普通商家不受影响：effectiveTenant 对非超管就是返回 acc.TenantID。
+	st, err := s.repo.CreateStore(r.Context(), acc.ID, effectiveTenant(r, acc), acc.OrgID,
+		strings.TrimSpace(req.Name), idgen.Slug())
 	if err != nil {
 		fail(w, http.StatusInternalServerError, CodeInternal, "创建门店失败")
 		return
@@ -312,6 +320,12 @@ func (s *Server) handleSaveDraft(w http.ResponseWriter, r *http.Request) {
 // 这是翻译链路的闸门：确认后原文被冻结为真值，所有译文都以它为准，
 // 因此责任主体明确落在商家身上（确认稿错了，译文自然跟着错）。
 // draft_id 可省略，省略时取最新一份——前端通常不关心具体版本号。
+//
+// ★ Q1（2026-10-19 用户拍板）：确认即把原文菜品落库。原先 dish 行只在
+// 翻译时才写，「已确认但未翻译」的店在客人端是**空菜单**——商家以为
+// 客人已能看到菜，实际客人只看到一个空页面。现在确认就落原文行
+// （names_json 为空），客人端按既有 L3 纪律渲染「原文 + 未翻译标」，
+// 翻译再在同一批行上补 names_json（见 handleTranslate 的同样装配）。
 func (s *Server) handleConfirmDraft(w http.ResponseWriter, r *http.Request) {
 	st, ok2 := s.requireStore(w, r)
 	if !ok2 {
@@ -322,21 +336,88 @@ func (s *Server) handleConfirmDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = decodeJSON(r, &req) // 允许空 body：不传 draft_id 就取最新稿
 
-	draftID := strings.TrimSpace(req.DraftID)
-	if draftID == "" {
+	// 取「要被确认的那一稿」：显式指定按 ID 取（读错稿会落错菜单），否则取最新
+	var draft *domain.SourceDraft
+	if id := strings.TrimSpace(req.DraftID); id != "" {
+		d, err := s.repo.GetDraftByID(r.Context(), st.ID, id)
+		if err != nil {
+			fail(w, http.StatusBadRequest, CodeValidation, "确认稿不存在")
+			return
+		}
+		draft = d
+	} else {
 		d, err := s.repo.GetLatestDraft(r.Context(), st.ID)
 		if err != nil {
 			fail(w, http.StatusBadRequest, CodeValidation, "请先上传菜单")
 			return
 		}
-		draftID = d.ID
+		draft = d
 	}
-	if err := s.repo.ConfirmDraft(r.Context(), st.ID, draftID); err != nil {
+
+	if err := s.repo.ConfirmDraft(r.Context(), st.ID, draft.ID); err != nil {
 		fail(w, http.StatusBadRequest, CodeValidation, "确认失败")
 		return
 	}
+	// 落库原文菜品（未翻译态）：客人端立即有菜单可看，商家端也能据此提醒「还没翻译」
+	if err := s.repo.ReplaceDishes(r.Context(), st.ID, s.dishesFromDraft(r.Context(), st.ID, pickedDraftItems(draft.Items))); err != nil {
+		fail(w, http.StatusInternalServerError, CodeInternal, "写入菜单失败")
+		return
+	}
 	_ = s.repo.TrackEvent(r.Context(), st.ID, "e_source_confirmed", nil)
-	ok(w, map[string]any{"ok": true, "draft_id": draftID})
+	ok(w, map[string]any{"ok": true, "draft_id": draft.ID})
+}
+
+// pickedDraftItems 取出「要落库的条目」：只收勾选的；一个都没勾视为全选。
+//
+// 与 handleTranslate 的勾选口径必须一致——确认落库的集合与翻译落库的集合
+// 如果是两套规则，客人端会在「确认后」与「翻译后」看到不同的菜单。
+func pickedDraftItems(items []domain.DraftItem) []domain.DraftItem {
+	picked := make([]domain.DraftItem, 0, len(items))
+	for _, it := range items {
+		if it.Selected {
+			picked = append(picked, it)
+		}
+	}
+	if len(picked) == 0 {
+		return items
+	}
+	return picked
+}
+
+// dishesFromDraft 把确认稿条目组装成菜品行，并从既有菜品继承动态状态与译文。
+//
+// 抽成共用函数是因为确认（handleConfirmDraft）与翻译（handleTranslate）走同一
+// 条装配路径：确认落原文行，翻译在同一批行上补 names_json。两边逻辑一致才能
+// 保证「确认后看到的菜单」与「翻译后看到的菜单」身份与状态不错位。
+// 继承项：售罄 / 每日剩余 / 属性 / 已有译文（重新确认不该毁掉已完成的翻译）。
+func (s *Server) dishesFromDraft(ctx context.Context, storeID string, items []domain.DraftItem) []domain.Dish {
+	existing, _ := s.repo.ListDishes(ctx, storeID)
+	prev := map[string]domain.Dish{}
+	for _, x := range existing {
+		prev[x.NameZh] = x
+	}
+	dishes := make([]domain.Dish, 0, len(items))
+	for i, it := range items {
+		dish := domain.Dish{
+			NameZh: it.Name, Price: it.Price, Category: it.Category, SortOrder: i,
+			// 默认属性：不辣 + 无过敏原（attrs 为空时前端也要能正常渲染）
+			Attrs: map[string]any{"spicy": 0, "allergens": []string{}},
+			Names: map[string]string{},
+		}
+		// 同名的旧菜：把动态状态与既有译文继承过来，避免「确认一次就丢售罄/译文」
+		if old, ok := prev[it.Name]; ok {
+			dish.SoldOut = old.SoldOut
+			dish.Remaining = old.Remaining
+			if len(old.Attrs) > 0 {
+				dish.Attrs = old.Attrs
+			}
+			for k, v := range old.Names {
+				dish.Names[k] = v
+			}
+		}
+		dishes = append(dishes, dish)
+	}
+	return dishes
 }
 
 // distinctCategories 取出菜品里出现过的分类名（去重、保序、剔除空值）。
@@ -446,45 +527,10 @@ func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {
 
 	// 只翻勾选的菜；一个都没勾 ⇒ 视为全选
 	// （「没勾」多数是前端还没实现勾选，此时全选比什么都不翻更符合预期）
-	picked := make([]domain.DraftItem, 0, len(d.Items))
-	for _, it := range d.Items {
-		if it.Selected {
-			picked = append(picked, it)
-		}
-	}
-	if len(picked) == 0 {
-		picked = d.Items
-	}
+	picked := pickedDraftItems(d.Items)
 
-	// 保留既有状态：售罄 / 每日剩余 / 属性 / 已有译文
-	// 以 name_zh 作为菜品身份键（同一份确认稿里菜名即天然主键）
-	existing, _ := s.repo.ListDishes(r.Context(), st.ID)
-	prev := map[string]domain.Dish{}
-	for _, x := range existing {
-		prev[x.NameZh] = x
-	}
-
-	dishes := make([]domain.Dish, 0, len(picked))
-	for i, it := range picked {
-		dish := domain.Dish{
-			NameZh: it.Name, Price: it.Price, Category: it.Category, SortOrder: i,
-			// 默认属性：不辣 + 无过敏原（attrs 为空时前端也要能正常渲染）
-			Attrs: map[string]any{"spicy": 0, "allergens": []string{}},
-			Names: map[string]string{},
-		}
-		// 同名的旧菜：把动态状态与既有译文继承过来，避免「翻一次就丢售罄/译文」
-		if old, ok := prev[it.Name]; ok {
-			dish.SoldOut = old.SoldOut
-			dish.Remaining = old.Remaining
-			if len(old.Attrs) > 0 {
-				dish.Attrs = old.Attrs
-			}
-			for k, v := range old.Names {
-				dish.Names[k] = v
-			}
-		}
-		dishes = append(dishes, dish)
-	}
+	// 与确认落库同一套装配：原文行 + 继承动态状态/既有译文（见 dishesFromDraft）
+	dishes := s.dishesFromDraft(r.Context(), st.ID, picked)
 
 	// 逐语种翻译：已有译文的跳过（省配额，也避免覆盖人工校对过的结果）
 	translatedTotal := 0

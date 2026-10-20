@@ -10,9 +10,10 @@
 #
 # 前置：另起一个后端实例，把翻译链指到黑洞地址：
 #   cd server && go build -o /tmp/lc-api ./cmd/api
-#   LC_ADDR=:8099 LC_TRANSLATE_URL=http://127.0.0.1:9 /tmp/lc-api
+#   LC_ADDR=:8099 LC_DEV=1 LC_TRANSLATE_URL=http://127.0.0.1:9 /tmp/lc-api
 #   （LC_TRANSLATE_URL 非空 → 主引擎换成 HTTPTranslator；地址不可达 → 必然失败
 #     → 触发 FallbackTranslator 的内置词典兜底）
+#   ★ LC_DEV=1 不能省：登录走固定验证码 000000（2026-10-19 起默认关闭）
 #
 # ★ 本脚本会先清空 translation_cache（翻译记忆）。
 #   不清的话，上一次在线跑出来的缓存会命中，把离线兜底整条路径「盖住」，
@@ -51,6 +52,12 @@ fi
 #     否则 bash 会把全角字符的首字节吞进变量名 → "unbound variable"。
 ok "后端在线（${B}）"
 ne "返回当前翻译引擎" "$(echo "$H" | J 'd["translate_mode"]')"
+# ★ F-5 回归（2026-10-19 修订）：本实例的翻译链刻意指向黑洞地址，
+#   健康检查必须如实说「配了链但连不上、实际在走词典」，而不是报 live。
+#   修订前的毛病：装配自带词典兜底 → Ready() 恒真 → 黑洞地址也报 live。
+eq "健康检查如实报出配的是自建链" "chain" "$(echo "$H" | J 'd["translate_engine"]')"
+eq "健康检查如实报出链不可达（黑洞地址）" "False" "$(echo "$H" | J 'd["translate_reachable"]')"
+eq "健康检查如实报出实际在走词典兜底" "dict-stub" "$(echo "$H" | J 'd["translate_mode"]')"
 
 if ! command -v psql >/dev/null 2>&1; then
   bad "找不到 psql，无法清空翻译记忆缓存（离线测试会假绿）"

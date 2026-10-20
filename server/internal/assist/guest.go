@@ -67,7 +67,7 @@ const (
 //  1. 菜品检索：从 RAG 里取出与问题相关的候选菜品；
 //  2. LLM 组织回答；无 LLM 时用确定性兜底（只陈述菜单里的事实）。
 //
-// 之后固定过三道守卫：菜品核验 → 价格核验 → 承诺边界。
+// 之后固定过四道守卫：菜品核验 → 未翻译泄露核验 → 价格核验 → 承诺边界。
 func (e *Engine) RespondGuest(ctx context.Context, in GuestAskInput) *Reply {
 	q := strings.TrimSpace(in.Question)
 	if q == "" {
@@ -83,6 +83,7 @@ func (e *Engine) RespondGuest(ctx context.Context, in GuestAskInput) *Reply {
 	}
 	// 出站守卫链（顺序固定，与经营助手同构）
 	rep = e.guardCitedDishes(rep, in.KB)
+	rep = e.guardNoRawChineseName(rep, in.KB)
 	rep = e.guardPrices(rep, in.KB)
 	rep = e.guardPromises(rep, nil)
 	rep.Actions = e.guestActions(rep, in.KB)
@@ -141,7 +142,9 @@ func (e *Engine) guestFallback(in GuestAskInput, q string) *Reply {
 		return &Reply{Content: guestUnknownHint(kb), Source: "fallback"}
 	}
 	var b strings.Builder
-	b.WriteString("菜单里这些可能相关：\n")
+	// ★ 引导语跟随客人语种（L1）：曾硬编码中文，英文客人会看到半中半英的
+	// 兜底回答——2026-10-19 修（与页面渲染纪律同一条要求）。
+	b.WriteString(guestListIntro(kb))
 	for _, d := range hits {
 		if d.SoldOut {
 			continue // 兜底只列可点的：售罄的菜列出来只会让白跑一趟
@@ -151,11 +154,24 @@ func (e *Engine) guestFallback(in GuestAskInput, q string) *Reply {
 	return &Reply{Content: b.String(), Source: "fallback"}
 }
 
+// guestListIntro 兜底列表的引导语（跟随客人语种，见渲染纪律 L1）。
+func guestListIntro(kb *StoreKB) string {
+	if kb.Lang != SourceLangFallback {
+		return "Here's what might match your question:\n"
+	}
+	return "菜单里这些可能相关：\n"
+}
+
 // guestDishLabel 一道菜的一行展示（含价格与标签；未翻译则不给原文名）。
 func guestDishLabel(d DishDoc, kb *StoreKB) string {
 	s := d.Name
 	if !d.NameLang {
-		s = "（暂无" + kb.LangName + "名称）"
+		// 「暂无当前语言名称」也要说客人听得懂的话（L1）
+		if kb.Lang != SourceLangFallback {
+			s = "(no " + kb.LangName + " name yet)"
+		} else {
+			s = "（暂无" + kb.LangName + "名称）"
+		}
 	}
 	if d.Price != "" {
 		s += " " + d.Price
@@ -267,14 +283,23 @@ func (e *Engine) guardPrices(rep *Reply, kb *StoreKB) *Reply {
 // 中文原名直接写给客人。这一腿是「提示词第 3 条」的兜底，双保险。
 //
 // 做法很克制：只删「[[NO_NAME_IN_XX]] 被替换成了原文」这种情况——
-// 即回答里出现了某个未翻译菜的中文名。正常译文不受影响。
+// 即回答里出现了某个未翻译菜的名字。正常译文不受影响。
+//
+// ★ 判据必须是「未翻译菜的别名 − 当前语言已译名」：
+//
+//	未翻译菜的所有语种名字（含中文原名）都算候选泄露串；但若同一个串
+//	同时是另一道菜在当前语言下的已译名，它就是合法内容，不能删。
+//	（早先的实现拿 AllowedNames() 做差集——那个集合包含未翻译菜自己的
+//	别名，差集恒为空，这一腿接了也永不触发。2026-10-19 审计实证。）
 func (e *Engine) guardNoRawChineseName(rep *Reply, kb *StoreKB) *Reply {
 	if rep == nil || kb == nil {
 		return rep
 	}
-	untranslated := map[string]bool{}
+	untranslated := map[string]bool{} // 未翻译菜的全部别名（含中文原名）
+	translated := map[string]bool{}   // 当前语言下已翻译的菜名（合法内容）
 	for _, d := range kb.Dishes {
 		if d.NameLang {
+			translated[d.Name] = true
 			continue
 		}
 		for _, a := range d.Aliases {
@@ -288,8 +313,8 @@ func (e *Engine) guardNoRawChineseName(rep *Reply, kb *StoreKB) *Reply {
 	for _, line := range splitLines(rep.Content) {
 		leak := false
 		for name := range untranslated {
-			// 只在「该行没有任何已译名」时才判泄露：否则可能是正常引用译文
-			if strings.Contains(line, name) && !kb.AllowedNames()[name] {
+			// 只有当该串不是任何菜的当前语言已译名时，出现才算泄露
+			if name != "" && strings.Contains(line, name) && !translated[name] {
 				leak = true
 				break
 			}
@@ -299,9 +324,12 @@ func (e *Engine) guardNoRawChineseName(rep *Reply, kb *StoreKB) *Reply {
 		}
 		kept = append(kept, line)
 	}
-	if len(kept) > 0 {
-		rep.Content = strings.Join(kept, "\n")
+	if len(kept) == 0 {
+		// 全泄露：不能把带原文的回答留给客人，回落诚实提示
+		rep.Content = guestUnknownHint(kb)
+		return rep
 	}
+	rep.Content = strings.Join(kept, "\n")
 	return rep
 }
 

@@ -31,6 +31,19 @@ import (
 func main() {
 	cfg := config.Load()
 
+	// ── 配置安全校验（2026-10-19 字节级审计 P0-4） ──
+	// 两条规则，都站在「忘记配置时系统必须失败」的一侧：
+	//   1. 开发模式必须是显式选择（LC_DEV=1）；忘了设的生产部署按生产跑，
+	//      不会因为默认值而敞开「固定验证码 000000 登录任意账号」的门；
+	//   2. 生产模式下 LC_SECRET 不允许是开发占位值或过短——token 用
+	//      HMAC-SHA256 自签，弱密钥等于任何人都能伪造登录态。
+	// 开发模式则只告警不拦截：本地就该零配置能跑。
+	if cfg.DevMode {
+		log.Printf("警告：开发模式已启用（LC_DEV=1）——验证码固定为 000000 且随响应回显；生产部署切勿设置该变量")
+	} else if cfg.Secret == config.DevSecret || len(cfg.Secret) < 32 {
+		log.Fatalf("生产模式必须设置 LC_SECRET：强随机值、至少 32 字符（当前是开发占位值或过短，token 可被伪造）。本地开发请显式设置 LC_DEV=1")
+	}
+
 	// 连库：失败即退出，因为本服务没有「无库降级」模式。
 	database, err := db.Open(cfg.DatabaseURL)
 	if err != nil {
@@ -97,7 +110,7 @@ func main() {
 		log.Printf("LangCross 商家店端 API 监听 %s ｜ OCR=%s ｜ 翻译=%s ｜ 门店页基址=%s",
 			cfg.Addr,
 			modeLabel(ocr.Ready(), "paddleocr", "stub-manual"),
-			modeLabel(tr.Ready(), "live", "dict-stub"),
+			translateStartupLabel(tr),
 			cfg.PublicBaseURL)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("HTTP 服务失败: %v", err)
@@ -122,4 +135,22 @@ func modeLabel(ready bool, live, fallback string) string {
 		return live
 	}
 	return fallback
+}
+
+// translateStartupLabel 启动日志里的翻译链形态，与 /api/health 同一口径（F-5）：
+// 不写 "live" 这种只看配置的说法，而是「什么引擎 + 此刻连得上吗」。
+//
+// 为什么值得单独做：启动日志是排障时看的第一行。若它对着一个黑洞地址
+// 报「翻译=live」，值班的人会先去别处找原因；而它如实报
+// 「chain(不可达→dict-stub)」，一眼就知道翻译实际在走内置词典。
+func translateStartupLabel(tr service.Translator) string {
+	rep, ok := tr.(service.TranslateReporter)
+	if !ok {
+		return modeLabel(tr.Ready(), "live", "dict-stub")
+	}
+	// 探测自带 2s 超时，这里不需要再套一层 ctx。
+	if !rep.TranslateReachable(context.Background()) {
+		return rep.TranslateEngine() + "(不可达→dict-stub)"
+	}
+	return rep.TranslateEngine() + "(live)"
 }
