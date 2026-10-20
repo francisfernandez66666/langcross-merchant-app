@@ -11,13 +11,13 @@
 
 | # | 审计报告条目 | 判定 | 关键证据 |
 |---|---|---|---|
-| P0-1 | 客人 AI 助手 LLM 装配断链 | **真缺陷（且注释与行为相反）** | `handlers_guest_assist.go:178` 传 `nil`；`handlers_assist.go:174-176` `acc == nil` 返回零值；产品文档《商业测算与缺口清单.md:20》把"客人提问自动回答的 LLM 成本"列为待测算项——文档以为已接线 |
+| P0-1 | 客人 AI 助手 LLM 装配断链 | **真缺陷（且注释与行为相反）→ 已修（FIX-7，见 §8）** | `handlers_guest_assist.go:178` 传 `nil`；`handlers_assist.go:174-176` `acc == nil` 返回零值；产品文档《商业测算与缺口清单.md:20》把"客人提问自动回答的 LLM 成本"列为待测算项——文档以为已接线 |
 | P0-2 | 全仓无 panic recovery | **真缺陷** | python 扫描非测试 Go 代码 `recover()` = 0 处；`router.go` 无 recovery 中间件 |
 | P0-3 | render-check 在 main 上红色 | **真缺陷（过程缺口）** | git：`98e5bf3` 加 AI 按钮未同步测试；实测 5 失败+崩溃；产品行为经独立探针 15/15 复验正确 |
 | P0-4 | LC_DEV 默认 1 + 默认密钥 | **真缺陷（加固缺口）** | `config.go:61-62`；注释自述"生产必须替换"但无强制 |
 | P1-1 | 无 RLS、tenant_id 无 FK | **真缺陷** | 6 个迁移 RLS/POLICY=0；`tenant_id TEXT` 无 REFERENCES；实测超管可建孤儿账号 |
 | P1-2 | 测试金字塔倒置 | **真缺陷** | 总覆盖 20.2%，httpapi 2.9%、repo 0% |
-| P1-3 | AI 凭据 repo 缺租户 WHERE | **真缺陷（且文件注释自称已做）** | `repo/ai_credential.go:16-19` 注释称"归属校验一律写进 WHERE"，实际 6 个方法全是 `WHERE id=$1`（:71-162），与 `repo/tenant.go:209-211` 翻译 Key 的 `id+tenant_id` 双条件不对称 |
+| P1-3 | AI 凭据 repo 缺租户 WHERE | **真缺陷（且文件注释自称已做）→ 已修（FIX-8，见 §8）** | `repo/ai_credential.go:16-19` 注释称"归属校验一律写进 WHERE"，实际 6 个方法全是 `WHERE id=$1`（:71-162），与 `repo/tenant.go:209-211` 翻译 Key 的 `id+tenant_id` 双条件不对称 |
 | P1-4 | 前端路由无守卫 | **已知权衡（明示设计）** | `AdminApp.tsx:50-52` 注释"刻意不做路由级守卫"；后端 fail-closed 已实测兜底（401/403 全对）。保留，仅做体验加固 |
 | P1-5 | 小程序契约漂移 | **真缺陷** | 后端返回 `{"requests":[…],"created_at":number}`（`handlers_guest_assist.go:292`、`domain/guest_request.go:66`），小程序读 `{items, created_at:string}`（`package-staff/.../index.tsx:18-24,33-39`）——字段名和类型双错，运行时会静默空列表 |
 | P1-6 | token 30 天无吊销 | **已知权衡（明示设计）** | `middleware.go:71-73` 注释：无状态 token 不可吊销，用每请求回库校验状态补偿；实测停用即时生效 |
@@ -95,8 +95,9 @@ func withRecover(next http.Handler) http.Handler {
 
 ### 批次 3：客人助手 LLM 接线（1–2 天，本期最高价值功能修复）
 
-#### FIX-7 按门店租户解析 LLM 凭据（P0-1）
+#### FIX-7 按门店租户解析 LLM 凭据（P0-1）★已落地，见 §8
 - **文件**：`server/internal/httpapi/handlers_guest_assist.go:178`（+ `handlers_assist.go` 旁路）
+- **状态**：**已修**（2026-10-20）。实际落地与下文方案有两处出入——按店日限一道（原方案只写了「或至少暴露调用量」，实际实现为 `reserveGuestLLM` 硬护栏），解析核心抽成 `llmConfigForTenant` 与商家端共用。详见 §8。
 - **现状**：`LLM: s.llmConfig(r.Context(), nil)` → `handlers_assist.go:174-176` 的 `acc == nil` 分支返回零值 → 永远规则兜底。
 - **改法**：基建已全部就绪——`repo.ActiveAICredentialForTenant`（`repo/ai_credential.go:84-98`）已实现"先租户后平台"解析，`service.AICredVault.Credential(ctx, tenantID)` 已存在。只需：
 ```go
@@ -114,7 +115,8 @@ func (s *Server) guestLLMConfig(ctx context.Context, tenantID string) assist.LLM
 
 ### 批次 4：隔离加固（1 天）
 
-#### FIX-8 AI 凭据 repo 层租户双条件（P1-3）
+#### FIX-8 AI 凭据 repo 层租户双条件（P1-3）★已落地，见 §8
+- **状态**：**已修**（2026-10-20）。最终形态不是下文的朴素双条件 `WHERE id=$1 AND tenant_id=$2`（那个形态会把平台超管挡在自己门外），而是三段式 `WHERE id=$1 AND (tenant_id=$2 OR tenant_id='' OR $2='')`。详见 §8。
 - **文件**：`server/internal/repo/ai_credential.go` 的 6 个方法（GetAICredential :71、AICredCiphertext :101、SetAICredentialStatus :112、UpdateAICredential :125、RotateAICredential :139、DeleteAICredential :154）
 - **改法**：全部加 `tenantID string` 参数，SQL 改 `WHERE id=$1 AND tenant_id=$2`，与 `repo/tenant.go:209-211` 翻译 Key 完全同构；httpapi 六个 handler（`handlers_assist_admin.go`）传入 `acc.TenantID`（平台超管传 `""`）。**改完文件头 :16-19 的注释才名副其实。**
 - **验收**：租户 A 的凭据 ID + 租户 B 的 tenantID → `ErrNotFound`（补 repo 测试或集成验证）；smoke_admin 23 条不回归。
@@ -221,9 +223,67 @@ func (s *Server) guestLLMConfig(ctx context.Context, tenantID string) assist.LLM
 | 数据清理 | `reset_test_data.sh` 扩面：租户前缀补 `lex`（能言联调遗留的空壳租户）、翻译 Key 支持按名字认（超管冒烟的 Key 建在默认租户 `langcross` 名下，删不掉租户）、**新增孤儿清扫**（event/guest_request 指向已删门店的行——历史清理只匹配当时还存在的门店，实测残留 36+8）。清后库干净：业务表全 0，仅留种子租户 + TM 缓存 + 审计留档 |
 | 全量中文注释 | 新增 `tools/check_doc_comments.py` 门禁（棘轮 + selftest，`make doc-comments` / `make test` 都会跑）：Go 导出函数/方法/类型、TS 导出函数/常量/接口，紧邻上一行必须是中文注释。存量 120 个缺口（Go 111 + TS 9）全清，基线钉 0；测试函数注释写「锁定的不变量」而非复述函数名。gofmt/vet/build/test + web tsc 全绿 |
 | 文档去过时 | README：小程序从「明确不做」改为「骨架已起步（S4 迁移中）」、技术栈表补 Taro 行、目录结构补 miniapp/tools/0007、`make test` 描述补注释门禁、新增纪律 21（导出符号必须有中文文档注释）；API.md：测试覆盖表计数全部刷新、confirm 补「即落库」语义、`translate_engine` 补 `lexicorn` 取值、smoke_admin 补 BASE 覆盖说明 |
-| 提交 | ⚠️ **未完成**：会话 shell 环境故障（sandbox-exec 数据对象超 64KB 上限，所有 bash/ripgrep 调用被拒），git commit / push 无法执行。代码改动全部就绪，待环境恢复后按「仅代码、不带文档与流程图」口径提交（排除 `*.md`；`tools/clean_env.sh` 含本机硬编码路径、`web/scripts/indep_guest_probe.mjs` 为早轮未引用探针，均留盘不入库） |
+| 提交 | ✅ **已完成**（当日晚些时候环境自行恢复后执行）：`b5000bd` 代码（71 文件，零 `*.md`）+ `0e32097` 文档（4 个 `.md`），已 push 并用 `git fetch` + `git status -sb` 复核 `92ab787..0e32097 main -> main`。口径按「仅代码、不带文档与流程图」：排除 `*.md`；`tools/clean_env.sh`（含本机硬编码路径）与 `web/scripts/indep_guest_probe.mjs`（早轮未引用探针）均留盘不入库 |
 
-**顺带发现（下批次输入）**：FIX-8 的「repo 六方法加 `tenant_id=$2` 双条件」原方案有坑——平台超管的 `tenant_id` 是空串，朴素双条件会把超管挡在自己门外。正确形态是 `WHERE id=$1 AND (tenant_id=$2 OR $2='')`（平台级账号可见全部），且要连带动 `repo/ai_credential.go:18-19` 那句「归属校验一律写进 WHERE」的注释才名副其实。该文件当前仍是 `WHERE id=$1`（P1-3 未修），实际暴露面有限（by-ID 路径都挂在超管专属 handler 后），但属于 defense-in-depth 欠账。
+**顺带发现（已在 §8 落地）**：FIX-8 的「repo 六方法加 `tenant_id=$2` 双条件」原方案有坑——平台超管的 `tenant_id` 是空串，朴素双条件会把超管挡在自己门外。正确形态是 `WHERE id=$1 AND (tenant_id=$2 OR $2='')`（平台级账号可见全部），且要连带动 `repo/ai_credential.go:18-19` 那句「归属校验一律写进 WHERE」的注释才名副其实。
+
+---
+
+## 8. 批次 3/4 落地记录（2026-10-20 晚）
+
+### FIX-8：AI 凭据 repo 归属口径
+
+| 面 | 落地内容 |
+|---|---|
+| repo | 6 个 by-ID 方法（`GetAICredential` / `AICredCiphertext` / `SetAICredentialStatus` / `UpdateAICredential` / `RotateAICredential` / `DeleteAICredential`）全部加 `tenantID` 参数，WHERE 改三段式 `id = $1 AND (tenant_id = $2 OR tenant_id = '' OR $2 = '')` |
+| service | `AICredStore` 接口签名收紧为 `AICredCiphertext(ctx, id, tenantID)`；`AICredVault.Credential` 解密时传请求方租户——租户解析到平台默认凭据时密文照样读得出来 |
+| httpapi | `handlers_assist_admin.go` 五个 handler（rotate / status / reveal / delete / test）调用点传 `currentAccount(r).TenantID`（平台超管为空串 → 可见全部） |
+| 文件头注释 | `repo/ai_credential.go` 头注释补上这个口径，并写明**为什么不是**朴素的 `tenant_id = $2` |
+
+**为什么是三段式而不是朴素双条件**：平台级凭据的 `tenant_id` 是空串，而超管自己的 `tenant_id` 也是空串。朴素 `WHERE id=$1 AND tenant_id=$2` 在「租户解析到平台默认凭据、再用超管身份去读密文」这条路径上会查不到行——把超管挡在自己维护的凭据门外。三段式放行两档：本租户的行 + 平台级的行。
+
+**测试**（21 例新增）：`repo/ai_credential_test.go` 15 例（记录型假 SQL 驱动，断言 **SQL 文本里带着作用域子句**而不是断言 Go 里的 if——口径写在 WHERE 里才是真的锁住；6 个方法逐个验 + 平台调用方传空串 + 全列 Scan + 写操作零行归一为 NotFound）；`service/ai_credential_test.go` 6 例（含 `TestAICredVault_TenantReadsPlatformCredential`，锁「租户经 vault 读平台默认凭据」这条空串放行的业务路径）。
+
+### FIX-7：客人助手按门店租户解析 LLM 凭据
+
+| 面 | 落地内容 |
+|---|---|
+| 解析核心 | `handlers_assist.go` 拆出 `llmConfigForTenant(ctx, tenantID)`，商家端 `llmConfig(acc)` 改为调它——两端共用一份解析逻辑，不会哪天单边漂移 |
+| 客人端接线 | `guestLLMConfig(ctx, storeID, tenantID)` = `llmConfigForTenant` + 按店日限；handler 调用点 `LLM: s.guestLLMConfig(r.Context(), st.ID, st.TenantID)`（原为 `s.llmConfig(r.Context(), nil)`） |
+| 成本护栏 | `guestLLMDailyLimit = 1000`（var，0 = 不限）、`guestLLMUsage` 按 storeID 记账、按 UTC 日期归零、`reserveGuestLLM` 原子占位。超限 → 收回 LLM 配置，客人仍得规则兜底回答 |
+| 计数口径 | 「尝试了一次模型模式」：模型调用失败也计——请求已发出、钱已花，按结果计数会让失败重试变成免费通道 |
+
+**为什么按店限而不是只靠按 IP 限流**：这个端点不登录，分布式脚本（一堆 IP 问同一家店）能绕过 30 次/分钟的 IP 护栏，而账单记在这家店用的凭据上。
+
+**测试**（5 例新增，`handlers_guest_assist_test.go`）：
+
+| 用例 | 锁的不变量 |
+|---|---|
+| `TestGuestAssist_LLMWiredWhenCredentialExists` | A：配了凭据 → `source=llm`、带回 model、mock LLM 被打 1 次、译文经守卫链原样带回 |
+| `TestGuestAssist_NoCredentialKeepsFallback` | B：没配凭据 → 现有行为不变（规则兜底、不打模型、回答非空） |
+| `TestGuestAssist_DailyLimitWithdrawsLLM` | C：限额内 2 次走模型，第 3 次超限收回 LLM 但**客人照常得到回答** |
+| `TestReserveGuestLLM_CountsAndResets` | 限额内放行 / 达限拒绝 / 跨 UTC 日归零 |
+| `TestReserveGuestLLM_ZeroMeansUnlimited` | 0 = 不限 |
+
+**自证测试非空转**：把接线临时回退成 `LLM: assist.LLMConfig{}` 复跑，A 与 C 立刻变红（`实际 fallback`），B 恒绿（本就锁「现有行为不变」）——证明 A/C 真的在守 FIX-7，而不是碰巧通过。
+
+**为什么测试里每个用例用各自的 storeID**：日限计数按 storeID 走，用例共用会让上一个消耗的名额算到下一个头上，绿红全凭执行顺序。
+
+### 回归结果（全绿）
+
+| 套件 | 结果 |
+|---|---|
+| `go test ./...` | 全绿（repo / service / httpapi / assist / domain / crypt / config） |
+| `gofmt -l` / `go vet` | 空 / 干净 |
+| `smoke.sh` | 77 / 0 |
+| `smoke_admin.sh`（`BASE=http://localhost:8080` 覆盖默认 8081） | 23 / 0 |
+| `smoke_offline.sh`（`:8099` 降级后端） | 32 / 0 |
+| `guest-render-check.mjs` | 62 / 0 |
+| `check_doc_comments.py` | go 0≤0 / fe 0≤0（新增 13 条假驱动方法注释） |
+
+### 剩余（下批次）
+
+FIX-10 覆盖率补层（httpapi 2.9% → 30%）、FIX-12 部署产物（nginx，`gzip on` 让 indep UAT 唯一失败项 B6 转绿）、FIX-13 god component 拆分。miniapp `npm run typecheck` 始终未跑成（沙箱网络限制）。
 
 ---
 
@@ -231,9 +291,9 @@ func (s *Server) guestLLMConfig(ctx context.Context, tenantID string) assist.LLM
 
 | 结论 | 证据位置 |
 |---|---|
-| 客人助手断链 | `handlers_guest_assist.go:178`、`handlers_assist.go:173-176`；行为实测 `source=fallback` |
+| 客人助手断链 | `handlers_guest_assist.go:178`、`handlers_assist.go:173-176`；行为实测 `source=fallback`（**已修**：现为 `s.guestLLMConfig(ctx, st.ID, st.TenantID)`，实测 `source=llm`，见 §8） |
 | 无 recover | python 全仓扫描（非测试）= 0 |
-| AI 凭据无双条件 | `repo/ai_credential.go:71-162`（6 处 `WHERE id=$1`）；对照 `repo/tenant.go:209-211` |
+| AI 凭据无双条件 | `repo/ai_credential.go:71-162`（6 处 `WHERE id=$1`）；对照 `repo/tenant.go:209-211`（**已修**：三段式 `id=$1 AND (tenant_id=$2 OR tenant_id='' OR $2='')`，见 §8） |
 | 死代码 | python 扫描 `guardNoRawChineseName` 0 调用点 |
 | 无 RLS/FK | 6 个迁移 RLS=0、tenant_id REFERENCES=0 |
 | 小程序漂移 | `domain/guest_request.go:66`（number）+ `handlers_guest_assist.go:292`（requests）vs `package-staff/.../index.tsx:18-24,33-39`（string/items） |
