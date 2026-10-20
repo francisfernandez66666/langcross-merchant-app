@@ -123,8 +123,13 @@ make smoke && make render-check
 make api-offline & make smoke-offline      # 确定性离线兜底
 make reset                                 # 清理测试数据（保留翻译记忆缓存）
 
-bash tools/indep_byte_uat.sh               # 独立字节级 UAT（68 条，另起一套断言，不复用上面任何脚本）
+bash tools/indep_byte_uat.sh               # 独立字节级 UAT（75 条，另起一套断言，不复用上面任何脚本）
 ```
+
+独立 UAT 额外覆盖这四套不碰的层次：特殊字符**字节级**双向比对（API 写 → psql 直读 → API 读回）、
+经 Vite 代理的真实部署路径、401/403/404/400/405/OPTIONS 错误信封统一性、token 载荷字段集（防角色烘焙进 token）、
+多租户隔离（一次性租户 → 本租户可见 → 他租户不可见 → 超管边界 → 回收断言残留 0）、租户外键三档语义（0007）。
+它**自带环境自证**（第 0 段）并**自行 psql 提权**——跑它不需要先跑过别的脚本。
 
 写测试脚本时踩过的坑（都已写进脚本注释）：
 
@@ -132,6 +137,45 @@ bash tools/indep_byte_uat.sh               # 独立字节级 UAT（68 条，另�
 - **`$VAR` 后面紧跟全角字符必须写成 `${VAR}`**（如 `"（${B}）"`）。否则 bash 会把全角字符的首字节吞进变量名，报 `unbound variable`。
 - **无头 Chrome 必须带 `--no-sandbox` / `--remote-allow-origins=*` / `--disable-dev-shm-usage`**。少任一个都连不上：本机沙箱里 Chrome 自带沙箱会 `SIGTRAP` 崩溃，DevTools WebSocket 握手会被拒（表现为 close code 1006）。
 - **`dish` 行在确认草稿时就落库**（2026-10-19 Q1 修订：确认与翻译共用同一装配，确认即有菜单）。未翻译只是 `names` 各语种为空，客人端展示原文并挂「未翻译」标、提示语如实说「尚未翻译」——测「缺译文」态直接建一家不翻译的店即可。
+- **独立脚本不要依赖别的脚本的副作用**（2026-10-20 修）：`indep_byte_uat.sh` 的 E 段原先假定「超管已存在」（由 `smoke_admin.sh` 提权）。清空业务数据后直接跑，四条断言一起变红——**看着像多租户回归，实际只是没有超管**（登录接口首次登录会建号，默认 `manager`，于是 `admin/*` 一律 403）。环境缺口伪装成功能回归，比漏测更消耗信任，所以脚本改为自行提权并自证角色已生效。
+- **断言跨行指令要先折叠换行**（2026-10-20 修）：`gzip_types` 这类 nginx 指令后面跟着三行类型，单行 `grep` 必然漏；断言写法不对导致的假红，比缺功能更难查。
+
+---
+
+## 部署
+
+产物在 `deploy/`，拓扑是「nginx 是唯一对外端口」：
+
+```
+浏览器 / 微信 ──▶ nginx (:80/:443)
+                    ├─ /api/*        ──▶ Go API (:8080)   反代 + 限流
+                    └─ 其它路径      ──▶ web/dist 静态 + history fallback
+```
+
+```bash
+# 1) 构建前端产物（落到 web/dist）
+cd web && npm run build
+
+# 2) 放置静态产物与 nginx 配置
+sudo mkdir -p /var/www/langcross && sudo cp -r web/dist /var/www/langcross/dist
+sudo cp deploy/nginx.conf /etc/nginx/conf.d/langcross.conf   # 记得改 server_name 与 TLS 段
+
+# 3) 构建并起后端（★ 不要设 LC_DEV；LC_SECRET 必须显式给真实值）
+cd server && go build -o bin/api ./cmd/api
+sudo cp deploy/langcross-api.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now langcross-api
+```
+
+| 关注点 | 放在哪 | 为什么 |
+|---|---|---|
+| 压缩（gzip） | **nginx** | 应用层保持零依赖：换 Caddy / CDN 不用改一行 Go；也不会出现「新增接口忘了过压缩中间件」这种没人会发现的债。因此 **API 直连 `:8080` 不带 `Content-Encoding` 是设计如此**，不是缺陷 |
+| TLS / 会话复用 | **nginx** | 客人是餐厅里扫码进来的，移动端网络差，会话复用省一次往返 |
+| 限流 | **两层** | 应用层是**进程内**计数（多实例各算各的），网关这层按真实来源 IP 计数，是挡分布式脚本的第一道门 |
+| SPA history fallback | **nginx** | 客人扫桌码进来是 `/s/{slug}`，磁盘上没有这个文件，必须回落 `index.html`，否则深链 404 |
+| 上传体积 | **nginx 8m** | 应用层 `MaxImageBytes` 是 5MB，网关留余量；不配的话大图上传会被网关 413 挡掉 |
+
+`deploy/langcross-api.service` 里 `KillSignal=SIGTERM` + `TimeoutStopSec=20` 是配合后端的优雅停机
+（收到 SIGTERM 后跑完 `Shutdown` 的 10s 宽限，在途请求与埋点 sink 有时间收尾）。
 
 ---
 
@@ -204,8 +248,11 @@ langcross-merchant-app/
 │       ├── utils/                # http（token 注入）/ storage（Taro 同步缓存）/ lang
 │       └── i18n/                 # 小程序端语种工具
 ├── tools/                        # 独立验证工具（不进 make 常规链）
-│   ├── indep_byte_uat.sh         # 独立字节级 UAT（68 条，另起一套断言）
+│   ├── indep_byte_uat.sh         # 独立字节级 UAT（75 条，另起一套断言，自带环境自证）
 │   └── check_doc_comments.py     # 导出面中文文档注释门禁（棘轮 + selftest）
+├── deploy/                       # 部署产物
+│   ├── nginx.conf                # SPA fallback + /api 反代 + gzip + 限流 + 上传体积
+│   └── langcross-api.service     # systemd 单元（含优雅停机宽限）
 ├── docs/API.md                   # 接口契约
 ├── Makefile
 └── .env.example
@@ -236,6 +283,9 @@ langcross-merchant-app/
 19. **租户归属必须有主**（2026-10-19 Q3）：`store` / `org` / `translation_api_key` 的 `tenant_id` 必须是真实存在的租户（0007 起有外键）；`account` / `ai_credential` 允许空串表示**平台级**（超管账号、平台默认 LLM 凭据），但非空就必须存在（触发器校验）。写门店归属一律走 `effectiveTenant(r, acc)`，**不要直接拿 `acc.TenantID`**——超管是空串，会写出一条谁都看不见的「无主门店」。删租户前必须先清账号与凭据（守卫会挡）；`org` 例外，它随租户级联删除。`admin_audit` 刻意不加约束：审计要活过租户。
 20. **状态报告只报事实**（2026-10-19 Q2）：健康检查与启动日志的翻译字段必须分开说「配了什么」（`translate_engine`）与「连得上吗」（`translate_reachable`）。翻译链配成黑洞地址时要如实报 `dict-stub` / `不可达`，**不许因为装配自带词典兜底就报 `live`**——装配成功 ≠ 引擎可用。
 21. **导出符号必须有中文文档注释**（2026-10-20）：Go 的导出函数 / 方法 / 类型、TS 的导出函数 / 常量 / 接口，紧邻上一行必须是中文 `//` 注释，写用途与边界，**不许复述符号名**。门禁 `tools/check_doc_comments.py`（`make doc-comments`）棘轮守住：新代码欠账就 exit 1。
+22. **压缩 / TLS / 限流归网关**（2026-10-20 FIX-12）：应用层保持零依赖，这些横切关注点交给 nginx（`deploy/nginx.conf`）。**API 直连不带 `Content-Encoding` 是设计如此**，别顺手在 Go 里加个 gzip 中间件——那样压缩逻辑会分裂到两处，网关再压一遍就是双重压缩，而且没人会发现。同理，SPA 深链回落必须配在网关，否则桌码扫出来 404。
+23. **归属口径写进 SQL，不写进 Go 的 if**（2026-10-20 FIX-8/10）：`WHERE id=$1 AND (tenant_id=$2 OR tenant_id='' OR $2='')`——平台级凭据与超管的 `tenant_id` 都是空串，朴素的 `tenant_id=$2` 会把超管挡在自己维护的凭据门外；列表的作用域同理必须落在 `WHERE` 里，不能「取全表回来再筛」。写测试时**断言 SQL 文本**而不是只断言响应，否则后一种实现照样能绿。
+24. **公开端点的成本护栏按「花钱的那个主体」计**（2026-10-20 FIX-7）：客人助手不登录，IP 限流挡不住分布式脚本，所以日限按**门店**计（`reserveGuestLLM`，默认 1000/店/天，0=不限，按 UTC 归零）。超限**收回 LLM 配置但客人照常得到回答**——护栏的目的是「不再花钱」，不是「让客人干等」。计数口径是「尝试了一次模型模式」，失败也计：请求已发出、钱已花，按结果计数会让失败重试变成免费通道。
 
 ---
 

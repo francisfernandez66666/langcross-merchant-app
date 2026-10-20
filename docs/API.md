@@ -117,9 +117,14 @@
 | GET | `/api/stores/{id}/requests` | 商家看服务请求（见上「商家端」表） |
 | POST | `/api/stores/{id}/requests/{rid}/done` | 标记完成 / 取消（见上「商家端」表） |
 
-- 限流：单 IP 30 次 / 分钟（进程内滑动窗口，防脚本打欠费；多实例各算各的）。
+- 限流：单 IP 30 次 / 分钟（进程内滑动窗口）+ 单店 1000 次 / 天（`reserveGuestLLM`，按 UTC 归零，0 = 不限）。
+  两层都是**进程内**计数（多实例各算各的），网关层另有 `limit_req`（见 `deploy/nginx.conf`）。
+  按店日限存在的原因是：本接口不登录，分布式脚本（一堆 IP 问同一家店）能绕过 IP 护栏，而账单记在这家店用的凭据上。
 - 语音识别在浏览器端做（Web Speech API），转文字后走 `/assist`；服务端不碰音频、不存音频。
 - `source` 取值：`llm`（模型模式）/ `rule`（规则模式）/ `flow`（多轮引导）/ `fallback`（答不上，转「按服务铃找店员」）。
+- ★ **LLM 凭据按门店租户解析**（2026-10-20 FIX-7）：先取本租户的 active 凭据，没有则用平台级默认（超管在后台维护的那条）。
+  客人是匿名的（没有账号），所以租户来源是门店本身而不是登录态。两种情形回落规则模式：店里没有可用凭据，
+  或已超当日名额——**两者都不影响应答**，客人照常拿到基于菜单事实的回答，只是不再花模型的钱。
 
 ## 平台 AI 凭据管理（超管）
 
@@ -209,5 +214,6 @@ LLM 凭据由平台超管统一维护、密文落库（`LC_SECRET` 派生的 AES
 | `server/scripts/smoke_admin.sh` | 23 条断言。超管正例：psql 提权 → 租户 CRUD、账号管理、翻译 Key（超管专属，脱敏+启停）、AI 凭据（can_write）、经理 vs 超管权限对照 403、审计留痕 |
 | `server/scripts/smoke_offline.sh` | 32 条断言。翻译链指向不可达地址 → 确定性验证内置词典兜底与「绝不编造」纪律；并回归健康检查诚实口径（黑洞地址必须报 `translate_reachable=false` / `translate_mode=dict-stub`） |
 | `web/scripts/guest-render-check.mjs` | 61 条稳定断言 + 1 条机翻质量条件断言（按设计可跳过）。真开无头浏览器，验证客人端渲染纪律与语言切换、零译文店夹具、AI 助手面板交互、商家端未翻译提醒横幅 |
-| `tools/indep_byte_uat.sh` | 68 条断言（唯一已知失败 B6：API 无 gzip/br 压缩，排期 FIX-12 走 nginx 层解决）。独立字节级 UAT，不复用上面任何脚本；含 0007 租户外键三档语义的 G1–G10 |
+| `tools/indep_byte_uat.sh` | 75 条断言，**全绿**。独立字节级 UAT，不复用上面任何脚本；含 0007 租户外键三档语义的 G1–G10。B6（压缩）已按「压缩归网关」结案并拆成两条：B6a 反向断言应用层**确实不**压缩（防止压缩逻辑分裂到两处），B6b 断言 `deploy/nginx.conf` 真开了 gzip 且覆盖 `application/json`、有 SPA fallback 与 `/api` 反代。脚本**自带环境自证并自行提权**，不依赖先跑过别的脚本 |
 | `tools/check_doc_comments.py` | 导出面中文文档注释门禁（棘轮）：新增导出符号不补注释就 exit 1；`make doc-comments` 或 `make test` 会跑 |
+| `go test ./...`（单测） | Go 单测：助手引擎、守卫链、凭据加解密、配置、翻译链与租户 Key、**withAuth / requireRole / effectiveTenant / withRecover 中间件**、**租户隔离（他租户 403、列表作用域必须进 SQL WHERE、超管跨租户 403 是设计）**、**后台门禁角色矩阵与输入校验**、**AI 凭据归属口径（记录型假 SQL 驱动断言 WHERE）**、**客人助手 LLM 接线（mock LLM server）**、**CanAccessStore 五级角色矩阵**。当前覆盖率：总 32.7%、httpapi 21.7%（目标 35% / 30%，余量见 `REMEDIATION_PLAN_2026-10-19.md` §8） |

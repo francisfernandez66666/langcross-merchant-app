@@ -29,7 +29,7 @@
 | P2-6 | 计费域缺席 | **路线图（非缺陷）** | 《可执行计划_前90天.md:137》"本期不做自助支付：P5=注册（免费）…付费=运营人工收款"；《商家店端MVP_开发任务拆解.md:4》硬约束"计费零改动"。**不是缺失，是范围决策** |
 | P2-7 | dish 行仅在翻译时落库 | **待产品决策** | `handlers_public.go:40` 公开页读 `ListDishes`；render-check 夹具注释自认此坑。未翻译店客人端空菜单——若商家确认稿后不翻译就印码，客人看到空白页 |
 | P2-8 | CORS 通配符 | **已知权衡（明示设计）** | `middleware.go:34-36` 注释：Bearer token 无 CSRF 风险，改 Cookie 必须收紧 |
-| P2-9 | 无部署产物 | **真缺陷（交付缺口）** | 无 Dockerfile/nginx/systemd；README 无部署章节；SPA fallback 需部署方自补 |
+| P2-9 | 无部署产物 | **真缺陷（交付缺口）→ 已修（FIX-12，见 §9）** | 曾：无 Dockerfile/nginx/systemd；README 无部署章节；SPA fallback 需部署方自补。现已补 `deploy/nginx.conf` + `deploy/langcross-api.service` + README 部署章节 |
 | F-5 | 健康检查报配置非可达性 | **待产品决策（低）** | `router.go` handleHealth 用 `s.tr.Ready()`（装配态）；实测 :8099 黑洞地址仍报 live |
 | D-1~D-8 | 文档漂移 8 项 | **文档缺陷（要修文档）** | README 137 vs 表内 160；router.go 注释缺 17 端点；API.md 65 vs 68；0005"四级角色"vs 实际五级；等（详见审计报告 §3.3） |
 
@@ -284,6 +284,74 @@ func (s *Server) guestLLMConfig(ctx context.Context, tenantID string) assist.LLM
 ### 剩余（下批次）
 
 FIX-10 覆盖率补层（httpapi 2.9% → 30%）、FIX-12 部署产物（nginx，`gzip on` 让 indep UAT 唯一失败项 B6 转绿）、FIX-13 god component 拆分。miniapp `npm run typecheck` 始终未跑成（沙箱网络限制）。
+
+---
+
+## 9. 收尾第二轮（2026-10-20 深夜）：FIX-10 / FIX-12 / FIX-13 部分
+
+### 先修两处「测试自己说谎」（本轮最重要的发现）
+
+**① indep UAT 的 E 段依赖别的脚本的副作用。** 清空业务数据后直接跑，E3/E3c/E4b/E8b 四条一起变红。
+查下来**不是多租户回归**：脚本假定「超管已存在」（由 `smoke_admin.sh` psql 提权），而数据清空后没有超管——
+登录接口首次登录会**自动建号**（默认 `manager`、默认租户），于是 `admin/*` 一律 403、建出的账号门店全落默认租户。
+**环境缺口伪装成了功能回归**，这类假红比漏测更消耗信任（第一眼真的会去查 `effectiveTenant`）。
+改法：E 段自行 psql 提权 + 重新取码（验证码一次性）+ 断言 `/api/me` 回报 `super_admin`，跑前零前置；
+收尾连同探针账号一起回收并断言残留 0。修完 E 段全绿，UAT 回到 69/1。
+
+**② B6 的断言层次不对。** 它探的是 API 直连 `:8080`，而压缩按设计在网关——照这个写法，
+就算 nginx 配好也永远红。改成两条：B6a **反向断言应用层确实不压缩**（防止有人顺手在 Go 里加 gzip 中间件，
+让压缩逻辑分裂到两处、网关再压一遍）；B6b 断言 `deploy/nginx.conf` 真开了 gzip 且覆盖 `application/json`、
+有 SPA fallback、有 `/api` 反代、有上传体积上限。顺带踩到：nginx 指令可跨行，单行 `grep` 抓 `gzip_types` 必然漏——
+**断言写法不对导致的假红，比缺功能更难查**。
+
+### FIX-12：部署产物（P2-9 + P2-2 结案）
+
+| 产物 | 内容 |
+|---|---|
+| `deploy/nginx.conf` | upstream + `gzip on`（含 `application/json`）、两级 `limit_req`（客人端公开接口最严）、`/api` 反代、`client_max_body_size 8m`（应用层 5MB 留余量）、`/assets/` 一年强缓存、**SPA history fallback**（桌码深链 `/s/{slug}` 靠它）、安全头、TLS 段（注释待解注） |
+| `deploy/langcross-api.service` | systemd：非 `LC_DEV` 启动、`LC_SECRET` 走 EnvironmentFile、`Restart=on-failure`、`KillSignal=SIGTERM` + `TimeoutStopSec=20`（配合后端 10s 优雅停机）、`ProtectSystem=strict` + 白名单可写路径 |
+
+**为什么压缩放网关而不是应用层**：应用层保持零依赖——换 Caddy / CDN 不用改一行 Go；也不会出现
+「新增接口忘了过压缩中间件」这种没人会发现的债。代价是 API 直连不压缩，这个代价被 B6a 显式锁住。
+
+### FIX-10：测试补层（推进，未达目标）
+
+| 新增 | 用例 | 锁的不变量 |
+|---|---|---|
+| `httpapi/tenant_isolation_test.go` | 8 | 他租户门店 403；owner 优先于租户判定；**超管跨租户门店详情 403 是设计而非 bug**（可见性出口在后台列表）；列表作用域必须写进 SQL `WHERE`（断言 SQL 文本，不让「取全表回来再筛」蒙混过关）；门店不存在是 404 不是 403 |
+| `httpapi/handlers_admin_test.go` | 7 | 后台门禁角色矩阵（含超管可指定租户 / 不传落默认租户）；`keysReady` 缺密钥时明确 500；租户编码字符集；**唯一冲突转 409、非冲突错误仍是 500**（防止把连接故障谎报成「换个编码再来」） |
+| `repo/store_test.go` | 2 | `CanAccessStore` 五级角色矩阵（owner 优先、超管仅默认租户、集团管理员限本租户）；`org_admin` 子树查询失败或没分配组织时**按无权处理** |
+
+**覆盖率**：总 30.9% → **32.7%**；httpapi 18.4% → **21.7%**；repo 3.6% → 5.2%。
+距计划目标（总 35% / httpapi 30%）**仍有缺口**——`handlers_admin.go` 的 30 余个 handler 与
+`handlers_merchant.go` 的主体仍是 0%，补齐是独立的 2–3 天工作量，按原计划排期，不假装做完。
+
+### FIX-13：已完成的一半（QrImage）
+
+`QrImage` 原先在 `AdminApp.tsx` 与 `Onboarding.tsx` 里各有一份**逐字重复**的副本，且两份都漏了
+`URL.revokeObjectURL`——`createObjectURL` 造的地址由浏览器一直持有（不参与 GC），门店页反复切换门店
+就是随使用时长线性增长的内存泄漏，低配收银平板上很明显。已抽出 `web/src/admin/QrImage.tsx`
+（cleanup 里回收，且 URL 变化时旧地址也回收），两处改为引用。
+
+**四组件拆分（AdminApp 911 / PlatformTab 860 / StorePage 710 / Onboarding 676 行）未做**：
+纯技术债，唯一的安全网是 render-check（62 条），收益是可维护性、风险是回归。按原计划「可排期」保留。
+
+### 回归结果（全绿）
+
+| 套件 | 结果 |
+|---|---|
+| `go test ./...` | 全绿；`gofmt -l` 空、`go vet` 干净、`tsc --noEmit` 干净 |
+| `smoke.sh` / `smoke_admin.sh` / `smoke_offline.sh` | 77 / 0、23 / 0、32 / 0 |
+| `guest-render-check.mjs` | 62 / 0 |
+| `tools/indep_byte_uat.sh` | **75 / 0（首次全绿）** |
+| `check_doc_comments.py` | 0 / 0 |
+
+### 文档同步
+
+README：新增「部署」章节（拓扑图 + 三步命令 + 「为什么压缩/TLS/限流在网关」表，补 D-8）、
+目录结构补 `deploy/`、独立 UAT 计数 68→75、新增纪律 22–24（压缩归网关 / 归属口径写进 SQL / 
+公开端点成本按花钱主体计）、「写测试脚本踩过的坑」补两条（脚本别依赖别的脚本的副作用；跨行指令先折叠换行）。
+API.md：测试覆盖表刷新并新增单测一行（含覆盖率与目标缺口）、客人助手补「凭据按门店租户解析 + 两级限流 + 超日限回落规则模式」。
 
 ---
 
