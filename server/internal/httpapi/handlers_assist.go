@@ -164,19 +164,30 @@ func (s *Server) handleAssistClear(w http.ResponseWriter, r *http.Request) {
 
 /* ── 事实构造（第一纪律：数字只能来自服务端） ─────────── */
 
-// llmConfig 解析当前请求该用的 LLM 配置。
+// llmConfig 解析当前请求该用的 LLM 配置（商家端：账号即租户）。
 //
 // 账号没有租户（平台级超管）时按平台级凭据解析（tenantID 为空串正好命中
 // repo 里的 tenant_id = ” 分支），因此这里不需要特判。
-// acc 为 nil（客人端匿名请求：没有账号可解析租户）同样返回零值——
-// 引擎走确定性兜底；给客人接租户级凭据是修订计划里的后续项（FIX-7）。
+// acc 为 nil 时返回零值——引擎走确定性兜底。给客人接租户级凭据是
+// FIX-7 的 guestLLMConfig（按门店租户，不走账号）。
 // 拿不到凭据时也返回零值——LLMConfig.Enabled() 为 false，
 // 引擎自动走确定性兜底，商家仍能得到「话术直配 / 知识库」级别的回答。
 func (s *Server) llmConfig(ctx context.Context, acc *domain.Account) assist.LLMConfig {
-	if s.aiCred == nil || acc == nil {
+	if acc == nil {
 		return assist.LLMConfig{}
 	}
-	cred, err := s.aiCred.Credential(ctx, acc.TenantID)
+	return s.llmConfigForTenant(ctx, acc.TenantID)
+}
+
+// llmConfigForTenant 按租户解析 LLM 配置（先租户后平台；都没有则零值走规则兜底）。
+//
+// 这是商家端与客人端共用的解析核心：两条路径的差别只在「租户从哪来」
+// （商家端取自账号，客人端取自门店），解析规则完全一致。
+func (s *Server) llmConfigForTenant(ctx context.Context, tenantID string) assist.LLMConfig {
+	if s.aiCred == nil {
+		return assist.LLMConfig{}
+	}
+	cred, err := s.aiCred.Credential(ctx, tenantID)
 	if err != nil || cred == nil {
 		return assist.LLMConfig{}
 	}

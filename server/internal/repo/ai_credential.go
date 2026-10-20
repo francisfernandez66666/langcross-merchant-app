@@ -18,6 +18,16 @@ import (
 //   - repo 层不重复做角色判断（那是 httpapi 的职责），但**归属校验一律写进 WHERE**，
 //     即便上层漏判，也读不到别家租户的凭据。
 //
+// 归属口径 `aiCredScope`（2026-10-20 FIX-8 补上，与 handleListAICredentials 的
+// 内存过滤同规则，按 ID 的读写与列表从此一致）：
+//
+//	平台级账号（tenantID 为空串，即超管 / 凭据箱解析到的平台凭据）→ 可见全部；
+//	其余账号                                                → 可见「本租户 + 平台级」。
+//
+// 为什么不是朴素的 `tenant_id = $2` 双条件：平台超管的 tenant_id 本身就是空串，
+// 朴素写法会把超管挡在自己门外（他因此碰不到任何租户的凭据）；而凭据箱按租户
+// 解析时，租户账号必须能读到平台级默认凭据的密文——两个方向都要求放行空串。
+//
 // 对应迁移：migrations/0006_org_rbac.sql 的 ai_credential / assist_session 两张表。
 
 const aiCredCols = `id, tenant_id, name, base_url, model, key_masked, status,
@@ -68,9 +78,11 @@ func (r *Repo) ListAICredentials(ctx context.Context) ([]domain.AICredential, er
 }
 
 // GetAICredential 按 ID 取凭据（不含密文）；不存在返回 ErrNotFound。
-func (r *Repo) GetAICredential(ctx context.Context, id string) (*domain.AICredential, error) {
+// tenantID 是调用方的租户作用域（空串 = 平台级，可见全部），口径见文件头 aiCredScope。
+func (r *Repo) GetAICredential(ctx context.Context, id, tenantID string) (*domain.AICredential, error) {
 	return scanAICred(r.DB.QueryRowContext(ctx,
-		`SELECT `+aiCredCols+` FROM ai_credential WHERE id = $1`, id))
+		`SELECT `+aiCredCols+` FROM ai_credential
+		 WHERE id = $1 AND (tenant_id = $2 OR tenant_id = '' OR $2 = '')`, id, tenantID))
 }
 
 // ActiveAICredentialForTenant 取某租户当前生效的 LLM 凭据。
@@ -98,10 +110,13 @@ func (r *Repo) ActiveAICredentialForTenant(ctx context.Context, tenantID string)
 }
 
 // AICredCiphertext 取凭据密文（解密前的原始字节）。
-func (r *Repo) AICredCiphertext(ctx context.Context, id string) ([]byte, error) {
+// tenantID 口径同 GetAICredential：平台级账号（空串）可取全部，租户账号只能取
+// 「本租户 + 平台级」——凭据箱按租户解析时传请求方租户即可读到平台默认凭据。
+func (r *Repo) AICredCiphertext(ctx context.Context, id, tenantID string) ([]byte, error) {
 	var blob []byte
 	err := r.DB.QueryRowContext(ctx,
-		`SELECT key_enc FROM ai_credential WHERE id = $1`, id).Scan(&blob)
+		`SELECT key_enc FROM ai_credential
+		 WHERE id = $1 AND (tenant_id = $2 OR tenant_id = '' OR $2 = '')`, id, tenantID).Scan(&blob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -109,9 +124,11 @@ func (r *Repo) AICredCiphertext(ctx context.Context, id string) ([]byte, error) 
 }
 
 // SetAICredentialStatus 启用 / 停用凭据。
-func (r *Repo) SetAICredentialStatus(ctx context.Context, id, status string) error {
+// tenantID 口径见文件头：写操作虽在 httpapi 层已门禁为超管专属，这里仍按作用域收紧。
+func (r *Repo) SetAICredentialStatus(ctx context.Context, id, tenantID, status string) error {
 	res, err := r.DB.ExecContext(ctx,
-		`UPDATE ai_credential SET status = $2, updated_at = now() WHERE id = $1`, id, status)
+		`UPDATE ai_credential SET status = $3, updated_at = now()
+		 WHERE id = $1 AND (tenant_id = $2 OR tenant_id = '' OR $2 = '')`, id, tenantID, status)
 	if err != nil {
 		return err
 	}
@@ -122,10 +139,12 @@ func (r *Repo) SetAICredentialStatus(ctx context.Context, id, status string) err
 }
 
 // UpdateAICredential 改凭据的非密钥字段（别名 / 地址 / 模型）。
-func (r *Repo) UpdateAICredential(ctx context.Context, id, name, baseURL, model string) error {
+// tenantID 口径同 SetAICredentialStatus。
+func (r *Repo) UpdateAICredential(ctx context.Context, id, tenantID, name, baseURL, model string) error {
 	res, err := r.DB.ExecContext(ctx,
-		`UPDATE ai_credential SET name = $2, base_url = $3, model = $4, updated_at = now() WHERE id = $1`,
-		id, strings.TrimSpace(name), strings.TrimSpace(baseURL), strings.TrimSpace(model))
+		`UPDATE ai_credential SET name = $3, base_url = $4, model = $5, updated_at = now()
+		 WHERE id = $1 AND (tenant_id = $2 OR tenant_id = '' OR $2 = '')`,
+		id, tenantID, strings.TrimSpace(name), strings.TrimSpace(baseURL), strings.TrimSpace(model))
 	if err != nil {
 		return err
 	}
@@ -136,10 +155,11 @@ func (r *Repo) UpdateAICredential(ctx context.Context, id, name, baseURL, model 
 }
 
 // RotateAICredential 轮换 key（新密文覆盖，旧的立即失效）。
-func (r *Repo) RotateAICredential(ctx context.Context, id string, enc []byte, masked string) error {
+// tenantID 口径同 SetAICredentialStatus。
+func (r *Repo) RotateAICredential(ctx context.Context, id, tenantID string, enc []byte, masked string) error {
 	res, err := r.DB.ExecContext(ctx,
-		`UPDATE ai_credential SET key_enc = $2, key_masked = $3, updated_at = now() WHERE id = $1`,
-		id, enc, masked)
+		`UPDATE ai_credential SET key_enc = $3, key_masked = $4, updated_at = now()
+		 WHERE id = $1 AND (tenant_id = $2 OR tenant_id = '' OR $2 = '')`, id, tenantID, enc, masked)
 	if err != nil {
 		return err
 	}
@@ -150,8 +170,11 @@ func (r *Repo) RotateAICredential(ctx context.Context, id string, enc []byte, ma
 }
 
 // DeleteAICredential 删除凭据。
-func (r *Repo) DeleteAICredential(ctx context.Context, id string) error {
-	res, err := r.DB.ExecContext(ctx, `DELETE FROM ai_credential WHERE id = $1`, id)
+// tenantID 口径同 SetAICredentialStatus。
+func (r *Repo) DeleteAICredential(ctx context.Context, id, tenantID string) error {
+	res, err := r.DB.ExecContext(ctx,
+		`DELETE FROM ai_credential WHERE id = $1 AND (tenant_id = $2 OR tenant_id = '' OR $2 = '')`,
+		id, tenantID)
 	if err != nil {
 		return err
 	}

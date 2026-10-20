@@ -20,6 +20,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
@@ -115,6 +116,69 @@ func setGuestCookie(w http.ResponseWriter, id string) {
 	})
 }
 
+// guestLLMDailyLimit 是单店每日 LLM 调用上限（var 而非 const：测试可调小；0 = 不限）。
+//
+// 为什么按店限而不是只靠按 IP 限流：这个端点不登录，分布式脚本
+// （一堆 IP 问同一家店）能绕过 30 次/分钟的 IP 护栏，而账单记在
+// 这家店用的凭据上。超限即收回 LLM 配置——客人仍得到规则兜底的回答
+// （菜单事实照样答），只是不再花模型的钱。默认 1000 次/店/天：
+// 一张 20 桌的桌子翻台三轮、每桌问 10 个问题也远够。
+var guestLLMDailyLimit = 1000
+
+var (
+	guestLLMMu    sync.Mutex
+	guestLLMUsage = map[string]*llmDailyUsage{}
+)
+
+// llmDailyUsage 记录某店当日的 LLM 调用数（按 UTC 日期归零，与 TenantPrimary 的日限同构）。
+type llmDailyUsage struct {
+	day   string
+	count int
+}
+
+// reserveGuestLLM 原子地检查并占用一个当日 LLM 名额。
+// 返回 false = 已超日限，调用方应收回 LLM 配置走规则兜底。
+//
+// 计数口径是「尝试了一次模型模式」：模型调用失败也计——请求已经发出去，
+// 钱已经花了，按结果计数会让失败重试变成免费通道。
+func reserveGuestLLM(storeID string) bool {
+	now := time.Now()
+	today := now.UTC().Format("2006-01-02")
+	guestLLMMu.Lock()
+	defer guestLLMMu.Unlock()
+	u := guestLLMUsage[storeID]
+	if u == nil || u.day != today {
+		u = &llmDailyUsage{day: today}
+		guestLLMUsage[storeID] = u
+	}
+	if guestLLMDailyLimit > 0 && u.count >= guestLLMDailyLimit {
+		return false
+	}
+	u.count++
+	return true
+}
+
+// guestLLMConfig 按门店租户解析客人助手的 LLM 凭据（FIX-7 接线点）。
+//
+// 与商家端 llmConfig 共用 llmConfigForTenant 解析核心，差别在两处：
+//   - 租户来源是门店（st.TenantID）而不是账号——客人匿名，没有账号可依；
+//   - 多一道按店日限（reserveGuestLLM）：这个端点不登录，IP 限流挡不住
+//     分布式脚本，成本护栏必须按「花钱的店」计。
+//
+// 返回零值（Enabled()=false）的两种情形：店里没用得上的凭据（无租户凭据
+// 也无平台默认），或已超当日名额——两者都让引擎走规则兜底，客人照常得到
+// 基于菜单事实的回答。
+func (s *Server) guestLLMConfig(ctx context.Context, storeID, tenantID string) assist.LLMConfig {
+	cfg := s.llmConfigForTenant(ctx, tenantID)
+	if !cfg.Enabled() {
+		return cfg // 无凭据的店本来就走规则兜底，不占名额
+	}
+	if !reserveGuestLLM(storeID) {
+		return assist.LLMConfig{} // 超日限：收回 LLM，仍给规则兜底
+	}
+	return cfg
+}
+
 // handleGuestAssist 客人提问一次（语音转文字后也走这里）。
 func (s *Server) handleGuestAssist(w http.ResponseWriter, r *http.Request) {
 	if s.assist == nil {
@@ -175,7 +239,11 @@ func (s *Server) handleGuestAssist(w http.ResponseWriter, r *http.Request) {
 		SessionID: sid,
 		Question:  q,
 		KB:        kb,
-		LLM:       s.llmConfig(r.Context(), nil), // ★ 当前未接线：客人是匿名的、没有账号，故传 nil → 走规则兜底；租户级 LLM 凭据接线见修订计划 FIX-7
+		// ★ FIX-7 接线：客人是匿名的（没有账号），但门店有租户——
+		// 按门店租户解析 LLM 凭据（先租户后平台），超管在后台维护的
+		// 平台级默认凭据因此对所有店生效；无凭据或超日限则
+		// 零值配置，引擎自动走规则兜底（现有行为不变）。
+		LLM: s.guestLLMConfig(r.Context(), st.ID, st.TenantID),
 	})
 	if rep == nil {
 		fail(w, http.StatusInternalServerError, CodeInternal, "助手没有给出回答")

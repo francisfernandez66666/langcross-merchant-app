@@ -177,7 +177,8 @@ func (s *Server) handleRotateAICredential(w http.ResponseWriter, r *http.Request
 		return
 	}
 	id := r.PathValue("id")
-	c, gerr := s.repo.GetAICredential(r.Context(), id)
+	tid := currentAccount(r).TenantID // 超管专属路径：平台超管为空串（可见全部）
+	c, gerr := s.repo.GetAICredential(r.Context(), id, tid)
 	if errors.Is(gerr, repo.ErrNotFound) {
 		fail(w, http.StatusNotFound, CodeNotFound, "凭据不存在")
 		return
@@ -186,7 +187,7 @@ func (s *Server) handleRotateAICredential(w http.ResponseWriter, r *http.Request
 		fail(w, http.StatusInternalServerError, CodeInternal, "读取凭据失败")
 		return
 	}
-	if err := s.repo.RotateAICredential(r.Context(), id, enc, crypt.Mask(key)); err != nil {
+	if err := s.repo.RotateAICredential(r.Context(), id, tid, enc, crypt.Mask(key)); err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			fail(w, http.StatusNotFound, CodeNotFound, "凭据不存在")
 			return
@@ -214,7 +215,8 @@ func (s *Server) handleSetAICredentialStatus(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	id := r.PathValue("id")
-	c, gerr := s.repo.GetAICredential(r.Context(), id)
+	tid := currentAccount(r).TenantID // 超管专属路径：平台超管为空串（可见全部）
+	c, gerr := s.repo.GetAICredential(r.Context(), id, tid)
 	if errors.Is(gerr, repo.ErrNotFound) {
 		fail(w, http.StatusNotFound, CodeNotFound, "凭据不存在")
 		return
@@ -223,7 +225,7 @@ func (s *Server) handleSetAICredentialStatus(w http.ResponseWriter, r *http.Requ
 		fail(w, http.StatusInternalServerError, CodeInternal, "读取凭据失败")
 		return
 	}
-	if err := s.repo.SetAICredentialStatus(r.Context(), id, req.Status); err != nil {
+	if err := s.repo.SetAICredentialStatus(r.Context(), id, tid, req.Status); err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			fail(w, http.StatusNotFound, CodeNotFound, "凭据不存在")
 			return
@@ -243,7 +245,8 @@ func (s *Server) handleRevealAICredential(w http.ResponseWriter, r *http.Request
 		return
 	}
 	id := r.PathValue("id")
-	c, gerr := s.repo.GetAICredential(r.Context(), id)
+	tid := currentAccount(r).TenantID // 超管专属路径：平台超管为空串（可见全部）
+	c, gerr := s.repo.GetAICredential(r.Context(), id, tid)
 	if errors.Is(gerr, repo.ErrNotFound) {
 		fail(w, http.StatusNotFound, CodeNotFound, "凭据不存在")
 		return
@@ -252,7 +255,7 @@ func (s *Server) handleRevealAICredential(w http.ResponseWriter, r *http.Request
 		fail(w, http.StatusInternalServerError, CodeInternal, "读取凭据失败")
 		return
 	}
-	blob, err := s.repo.AICredCiphertext(r.Context(), id)
+	blob, err := s.repo.AICredCiphertext(r.Context(), id, tid)
 	if err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			fail(w, http.StatusNotFound, CodeNotFound, "凭据不存在")
@@ -277,7 +280,8 @@ func (s *Server) handleDeleteAICredential(w http.ResponseWriter, r *http.Request
 		return
 	}
 	id := r.PathValue("id")
-	c, gerr := s.repo.GetAICredential(r.Context(), id)
+	tid := currentAccount(r).TenantID // 超管专属路径：平台超管为空串（可见全部）
+	c, gerr := s.repo.GetAICredential(r.Context(), id, tid)
 	if errors.Is(gerr, repo.ErrNotFound) {
 		fail(w, http.StatusNotFound, CodeNotFound, "凭据不存在")
 		return
@@ -286,7 +290,7 @@ func (s *Server) handleDeleteAICredential(w http.ResponseWriter, r *http.Request
 		fail(w, http.StatusInternalServerError, CodeInternal, "读取凭据失败")
 		return
 	}
-	if err := s.repo.DeleteAICredential(r.Context(), id); err != nil {
+	if err := s.repo.DeleteAICredential(r.Context(), id, tid); err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			fail(w, http.StatusNotFound, CodeNotFound, "凭据不存在")
 			return
@@ -310,7 +314,8 @@ func (s *Server) handleTestAICredential(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id := r.PathValue("id")
-	c, gerr := s.repo.GetAICredential(r.Context(), id)
+	tid := currentAccount(r).TenantID // 超管专属路径：平台超管为空串（可见全部）
+	c, gerr := s.repo.GetAICredential(r.Context(), id, tid)
 	if errors.Is(gerr, repo.ErrNotFound) {
 		fail(w, http.StatusNotFound, CodeNotFound, "凭据不存在")
 		return
@@ -319,7 +324,7 @@ func (s *Server) handleTestAICredential(w http.ResponseWriter, r *http.Request) 
 		fail(w, http.StatusInternalServerError, CodeInternal, "读取凭据失败")
 		return
 	}
-	blob, err := s.repo.AICredCiphertext(r.Context(), id)
+	blob, err := s.repo.AICredCiphertext(r.Context(), id, tid)
 	if err != nil {
 		fail(w, http.StatusNotFound, CodeNotFound, "凭据不存在")
 		return

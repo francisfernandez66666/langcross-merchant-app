@@ -24,9 +24,11 @@ import (
 )
 
 // AICredStore 是 AICredVault 依赖的存储能力（*repo.Repo 天然满足）。
+// AICredCiphertext 的 tenantID 是请求方租户作用域：租户账号经此读「本租户或
+// 平台级」凭据的密文（平台默认凭据必须放行，否则助手对租户永远降级）。
 type AICredStore interface {
 	ActiveAICredentialForTenant(ctx context.Context, tenantID string) (*domain.AICredential, error)
-	AICredCiphertext(ctx context.Context, id string) ([]byte, error)
+	AICredCiphertext(ctx context.Context, id, tenantID string) ([]byte, error)
 }
 
 // AICredVault 解析「这个租户现在该用哪份 LLM 凭据」。
@@ -80,7 +82,9 @@ func (v *AICredVault) Credential(ctx context.Context, tenantID string) (*domain.
 	}
 	var cred *domain.LLMCredential
 	if c != nil {
-		blob, berr := v.store.AICredCiphertext(ctx, c.ID)
+		// 传请求方租户：repo 的作用域口径放行「本租户 + 平台级」两档，
+		// 因此租户解析到平台默认凭据时密文照样读得出来。
+		blob, berr := v.store.AICredCiphertext(ctx, c.ID, tenantID)
 		if berr != nil {
 			return nil, berr
 		}
