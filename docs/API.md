@@ -15,9 +15,23 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/health` | 返回 `ocr_ready` / `ocr_mode` / `translate_ready` / `translate_mode` |
+| GET | `/api/health` | 返回 `dev_mode` / `ocr_ready` / `ocr_mode` / `translate_engine` / `translate_reachable` / `translate_ready` / `translate_mode` |
 
-`ocr_mode` ∈ `paddleocr` \| `stub-manual`；`translate_mode` ∈ `live` \| `dict-stub`。
+`ocr_mode` ∈ `paddleocr` \| `stub-manual`。
+
+翻译字段的**诚实口径**（2026-10-19 修订，见审计 F-5）：以前只看「装配是否成功」，
+而装配永远带内置词典兜底，于是把 `LC_TRANSLATE_URL` 配成黑洞地址（端口没人听）时
+健康检查照样报 `live`——运维看到「翻译很健康」，实际每次翻译都在降级。现在分三层：
+
+| 字段 | 语义 | 取值 |
+|---|---|---|
+| `translate_engine` | 配了哪个主引擎（纯配置，零 IO） | `chain`（自建链）/ `mymemory`（公开 API）/ `lexicorn`（租户配了能言 Key）/ `dict`（仅词典） |
+| `translate_reachable` | 主引擎此刻是否应答 | 懒探测 + 30s TTL：只在查健康时探测一次，不占后台 goroutine |
+| `translate_ready` | 主引擎是否真的能用 | = `translate_reachable` |
+| `translate_mode` | 实际在走哪条路 | `live`（主引擎在用）/ `dict-stub`（实际在走内置词典） |
+
+探测只答 **liveness**（对方有没有应答），不答「翻译质量好不好」——后者由请求时
+的降级链保证。连通黑洞地址时 `translate_reachable=false`、`translate_mode=dict-stub`。
 
 ## 认证
 
@@ -46,7 +60,7 @@
 | GET | `/api/stores/{id}/qr?ref=door\|t01` | 门口码 / 桌码 PNG |
 | GET | `/api/stores/{id}/draft` | 最新原文确认稿 |
 | POST | `/api/stores/{id}/draft` | 保存确认稿 `{lang, items:[{name,price,category,selected}]}` |
-| POST | `/api/stores/{id}/draft/confirm` | 确认原文；★ **未确认不允许翻译**（否则 `VALIDATION`） |
+| POST | `/api/stores/{id}/draft/confirm` | 确认原文；★ **未确认不允许翻译**（否则 `VALIDATION`）；★ 确认即把菜品落库（2026-10-19 Q1 修订：确认与翻译共用同一装配，确认即有菜单），未翻译的语种在 `names` 里不出现 key |
 | POST | `/api/stores/{id}/translate` | 多语化：`{targets:["en","ja",...]}` → 只翻 `selected` 的菜，结果写 `dish.names_json`；**同批顺带把分类名多语化**写 `store.category_names`。返回 `{dishes, translated_count, targets, categories, engine}` |
 | GET | `/api/stores/{id}/dishes` | 菜单（每道菜含 `name_zh` + `names`） |
 | PATCH | `/api/stores/{id}/dishes/{dishId}` | 更新售罄 / 每日剩余 |
@@ -173,7 +187,7 @@ LLM 凭据由平台超管统一维护、密文落库（`LC_SECRET` 派生的 AES
 |---|---|---|
 | GET | `/api/admin/audit` | 最近 200 条审计（超管全量；租户管理员后端按租户过滤）。动作含建租户、改角色、维护 Key、查看明文等 |
 
-超管端到端验证：`bash server/scripts/smoke_admin.sh`（需 psql 提权，见脚本头注释）。
+超管端到端验证：`bash server/scripts/smoke_admin.sh`（需 psql 提权，见脚本头注释；脚本默认 BASE 指向 `:8081`，打 `:8080` 时用 `BASE=http://localhost:8080` 覆盖）。
 
 ## 工具
 
@@ -191,7 +205,9 @@ LLM 凭据由平台超管统一维护、密文落库（`LC_SECRET` 派生的 AES
 
 | 脚本 | 覆盖 |
 |---|---|
-| `server/scripts/smoke.sh` | 28 步、69 条断言。含语种注册表、一次 5 语种翻译、分类名多语化、注册前多语预览、券面本地化、评分契约、跨店核销拒绝、双码 PNG 魔数、客人端 AI 点菜助手（RAG 检索）、服务请求全链路（发起/待办/标记完成）、AI 凭据 RBAC 守卫、翻译 Key RBAC 守卫（普通商家连列表都 403）、菜品图片（上传/公开访问 PNG 魔数/删除 404） |
+| `server/scripts/smoke.sh` | 28 步、77 条断言。含语种注册表、一次 5 语种翻译、分类名多语化、注册前多语预览、券面本地化、评分契约、跨店核销拒绝、双码 PNG 魔数、客人端 AI 点菜助手（RAG 检索）、服务请求全链路（发起/待办/标记完成）、AI 凭据 RBAC 守卫、翻译 Key RBAC 守卫（普通商家连列表都 403）、菜品图片（上传/公开访问 PNG 魔数/删除 404）、**Q1 确认即落库 + 商户未翻译提醒** |
 | `server/scripts/smoke_admin.sh` | 23 条断言。超管正例：psql 提权 → 租户 CRUD、账号管理、翻译 Key（超管专属，脱敏+启停）、AI 凭据（can_write）、经理 vs 超管权限对照 403、审计留痕 |
-| `server/scripts/smoke_offline.sh` | 29 条断言。翻译链指向不可达地址 → 确定性验证内置词典兜底与「绝不编造」纪律 |
-| `web/scripts/guest-render-check.mjs` | 39 条断言。真开无头浏览器，验证客人端渲染纪律与语言切换 |
+| `server/scripts/smoke_offline.sh` | 32 条断言。翻译链指向不可达地址 → 确定性验证内置词典兜底与「绝不编造」纪律；并回归健康检查诚实口径（黑洞地址必须报 `translate_reachable=false` / `translate_mode=dict-stub`） |
+| `web/scripts/guest-render-check.mjs` | 61 条稳定断言 + 1 条机翻质量条件断言（按设计可跳过）。真开无头浏览器，验证客人端渲染纪律与语言切换、零译文店夹具、AI 助手面板交互、商家端未翻译提醒横幅 |
+| `tools/indep_byte_uat.sh` | 68 条断言（唯一已知失败 B6：API 无 gzip/br 压缩，排期 FIX-12 走 nginx 层解决）。独立字节级 UAT，不复用上面任何脚本；含 0007 租户外键三档语义的 G1–G10 |
+| `tools/check_doc_comments.py` | 导出面中文文档注释门禁（棘轮）：新增导出符号不补注释就 exit 1；`make doc-comments` 或 `make test` 会跑 |

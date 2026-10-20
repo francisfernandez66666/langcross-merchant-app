@@ -37,7 +37,7 @@
 - **翻译引擎链**：租户配了能言 Key 走能言开放平台（按租户解析，失败即降级），
   否则走自建链 / MyMemory，再不成交给内置词典——整条链对菜品价格与菜名**绝不编造**。
 
-**明确不做**（二期）：在线支付、改收银、接 POS、外卖对接、小程序原生、多店后台。
+**明确不做**（二期）：在线支付、改收银、接 POS、外卖对接、多店后台。小程序端已起步（`miniapp/`，Taro 骨架：客人端门店页 / 商家后台首页 / 店员待办三页已迁移，其余 Tab 待 S4），不算「不做」也不算「做完」。
 
 ---
 
@@ -48,6 +48,7 @@
 | 后端 | **Go 1.22+**（标准库 `net/http`，方法+通配符路由） | 无 Web 框架依赖 |
 | 数据库 | **PostgreSQL** | 本期不上 pgvector，单店菜单用文本相似度足够 |
 | 前端 | **React 18 + TypeScript + Vite** | 客人端 H5 与商家端后台同一应用、按路由分端 |
+| 小程序 | **Taro 4 + React**（`miniapp/`） | 微信小程序端骨架：客人端门店页 / 商家后台首页 / 店员待办已迁移，其余 Tab 待 S4；表格改 flex 行、select 改 Picker（迁移规则见方案 §4.3） |
 | 二维码 | `github.com/skip2/go-qrcode` | 门口码 / 桌码 PNG |
 | OCR | **可插拔**：默认 stub（前端走手动保底）→ 生产接 Python PaddleOCR 微服务 | 服务端识别，端侧无 OCR |
 | 翻译 | **可插拔**：TM 缓存（`translation_cache`）→ 主引擎（租户配了能言 Key 走能言开放平台 → 否则 `LC_TRANSLATE_URL` 自建链／MyMemory）→ 内置中→英词典（离线兜底） | **10 语种**；词典未收录的词返回空，**不编造**；能言 Key 由超管在后台维护，密文落库 |
@@ -77,11 +78,16 @@ createdb langcross
 
 # 2) 起后端（启动时自动执行迁移）
 cd server
-LC_DATABASE_URL="postgres://localhost:5432/langcross?sslmode=disable" go run ./cmd/api
+LC_DEV=1 LC_DATABASE_URL="postgres://localhost:5432/langcross?sslmode=disable" go run ./cmd/api
+#     ^^^^^^ 开发模式：验证码固定 000000 并回显。不设即生产模式——
+#            token 密钥不允许用默认占位值（main.go 会拒绝启动）。
 
 # 3) 起前端
 cd web && npm install && npm run dev
 ```
+
+小程序端（`miniapp/`，Taro 骨架）另行安装依赖后用微信开发者工具打开
+`miniapp/dist/dev/mp-weixin`（`npm run dev:weapp` 编译）；H5 预览走 `npm run dev:h5`。
 
 | 入口 | 地址 |
 |---|---|
@@ -99,15 +105,15 @@ bash server/scripts/seed_demo.sh          # 结束时会打印门店页 URL
 
 ## 测试
 
-四套入口，共 **137 条断言**，全部可重复执行。
+四套入口，共 **193 条断言**，全部可重复执行（另有 1 条机翻质量条件断言：回复是否提及菜单菜品，命中才计分，未命中按设计跳过）。
 
 | 命令 | 断言 | 前置 | 覆盖 |
 |---|---|---|---|
-| `make test` | — | 无 | Go 单测（兜底链路 / 语种注册表 / 接口工具函数）+ `gofmt` / `go vet` / `tsc --noEmit` |
-| `make smoke` | 69 | 后端 `:8080` | 端到端 28 步：健康检查 → 语种注册表 → 认证 → 建店（自动配券+双码）→ 保存确认稿 → **未确认拒绝翻译** → 确认 → **一次 5 语种多语化** → 译文落库 → **分类名多语化** → **注册前多语预览** → 公开门店页 → 评价领券（含**券面本地化**）→ **评分契约** → 核销 → 重复核销拒绝 → **跨店核销拒绝** → 经营洞察 → 双码 PNG 魔数 → **客人端 AI 点菜助手（RAG 检索）** → **服务请求全链路**（客人发起 / 商家待办 / 标记完成 / 待办下降）→ **AI 凭据 RBAC 守卫** → **翻译 Key RBAC 守卫**（超管专属，普通商家连列表都 403）→ **菜品图片**（上传 / 公开访问 PNG 魔数 / 删除 404） |
-| `make smoke-offline` | 29 | 另起 `:8099`（`make api-offline`） | 把翻译链指向不可达地址 → 确定性验证**内置词典兜底**与「**绝不编造**」纪律（未收录词必须留空、词典只覆盖中→英、其它语种不得回填原文） |
-| `make render-check` | 39 | 后端 + 前端 dev server | **真开无头浏览器**，用 CDP 断言客人端渲染纪律 L1–L6、语言选择器 10 项、切语言同步 `<html lang>`、缺译文标注，并回归「评价弹层一打开整页崩」的 React 保留属性 P0 事故 |
-| `bash scripts/smoke_admin.sh` | 23 | 后端 `:8081` + 开发库 psql | 超管正例：psql 提权 → 租户 CRUD、账号管理、翻译 Key（超管专属：脱敏+启停）、AI 凭据（can_write）、经理 vs 超管权限对照 403、审计留痕。**只跑开发库**（提权是危险操作，脚本刻意不自动化） |
+| `make test` | — | 无 | Go 单测（兜底链路 / 语种注册表 / 接口工具函数）+ `gofmt` / `go vet` / `tsc --noEmit` + 导出面中文文档注释门禁（`tools/check_doc_comments.py`，棘轮：新导出符号不补注释就红） |
+| `make smoke` | 77 | 后端 `:8080` | 端到端 28 步：健康检查 → 语种注册表 → 认证 → 建店（自动配券+双码）→ 保存确认稿 → **未确认拒绝翻译** → 确认 → **一次 5 语种多语化** → 译文落库 → **分类名多语化** → **注册前多语预览** → 公开门店页 → 评价领券（含**券面本地化**）→ **评分契约** → 核销 → 重复核销拒绝 → **跨店核销拒绝** → 经营洞察 → 双码 PNG 魔数 → **客人端 AI 点菜助手（RAG 检索）** → **服务请求全链路**（客人发起 / 商家待办 / 标记完成 / 待办下降）→ **AI 凭据 RBAC 守卫** → **翻译 Key RBAC 守卫**（超管专属，普通商家连列表都 403）→ **菜品图片**（上传 / 公开访问 PNG 魔数 / 删除 404） |
+| `make smoke-offline` | 32 | 另起 `:8099`（`make api-offline`） | 把翻译链指向不可达地址 → 确定性验证**内置词典兜底**与「**绝不编造**」纪律（未收录词必须留空、词典只覆盖中→英、其它语种不得回填原文）；并回归**健康检查诚实口径**（黑洞地址必须报 `translate_reachable=false` / `translate_mode=dict-stub`，而不是谎报 live） |
+| `make render-check` | 61+1 | 后端 + 前端 dev server | **真开无头浏览器**，用 CDP 断言客人端渲染纪律 L1–L6、语言选择器 10 项、切语言同步 `<html lang>`、缺译文标注，并回归「评价弹层一打开整页崩」的 React 保留属性 P0 事故；含**零译文店夹具**（确认即有菜单、未翻译如实标注而非谎称机器翻译）、**AI 助手面板**交互，以及**商家端未翻译提醒横幅**（零译文弹出、补翻后消失）。「+1」为机翻质量条件断言（回复是否提及菜单菜品），按设计可跳过 |
+| `bash scripts/smoke_admin.sh` | 23 | 后端（脚本默认 `:8081`，可用 `BASE=` 覆盖）+ 开发库 psql | 超管正例：psql 提权 → 租户 CRUD、账号管理、翻译 Key（超管专属：脱敏+启停）、AI 凭据（can_write）、经理 vs 超管权限对照 403、审计留痕。**只跑开发库**（提权是危险操作，脚本刻意不自动化） |
 
 ```bash
 # 典型用法
@@ -116,6 +122,8 @@ make api & make web &                      # 起服务
 make smoke && make render-check
 make api-offline & make smoke-offline      # 确定性离线兜底
 make reset                                 # 清理测试数据（保留翻译记忆缓存）
+
+bash tools/indep_byte_uat.sh               # 独立字节级 UAT（68 条，另起一套断言，不复用上面任何脚本）
 ```
 
 写测试脚本时踩过的坑（都已写进脚本注释）：
@@ -123,7 +131,7 @@ make reset                                 # 清理测试数据（保留翻译�
 - **清缓存是离线测试的前提**。TM 缓存会命中上一次在线跑出来的译文，把离线兜底整条路径「盖住」，测试假绿。
 - **`$VAR` 后面紧跟全角字符必须写成 `${VAR}`**（如 `"（${B}）"`）。否则 bash 会把全角字符的首字节吞进变量名，报 `unbound variable`。
 - **无头 Chrome 必须带 `--no-sandbox` / `--remote-allow-origins=*` / `--disable-dev-shm-usage`**。少任一个都连不上：本机沙箱里 Chrome 自带沙箱会 `SIGTRAP` 崩溃，DevTools WebSocket 握手会被拒（表现为 close code 1006）。
-- **`dish` 行是翻译时才落库的**。一家「完全没翻过译」的店在客人端是空菜单，测不到「缺译文」态；正确造法是指定一个没翻过的目标语种去看。
+- **`dish` 行在确认草稿时就落库**（2026-10-19 Q1 修订：确认与翻译共用同一装配，确认即有菜单）。未翻译只是 `names` 各语种为空，客人端展示原文并挂「未翻译」标、提示语如实说「尚未翻译」——测「缺译文」态直接建一家不翻译的店即可。
 
 ---
 
@@ -165,7 +173,8 @@ langcross-merchant-app/
 │   │   ├── 0003_category_i18n.sql# store.category_names
 │   │   ├── 0004_dish_image.sql   # 菜品图片
 │   │   ├── 0005_tenant_rbac.sql  # 租户 / 角色 RBAC
-│   │   └── 0006_org_rbac.sql     # 组织 RBAC + guest_request 服务请求表
+│   │   ├── 0006_org_rbac.sql     # 组织 RBAC + guest_request 服务请求表
+│   │   └── 0007_tenant_fk.sql    # 租户外键（先 FK 后 RLS）：三档约束 + 删租户守卫 + 孤儿硬失败
 │   └── scripts/
 │       ├── smoke.sh              # 端到端冒烟测试（在线引擎，28 步带断言）
 │       ├── smoke_admin.sh        # 超管端到端冒烟（psql 提权；只跑开发库）
@@ -186,6 +195,17 @@ langcross-merchant-app/
 │       ├── admin/AICredentialsTab.tsx # 平台 AI 凭据管理（超管；tenant_admin 只读）
 │       ├── admin/Onboarding.tsx  # 引导流 P1–P5（P4 支持多语种预览）
 │       └── styles/global.css     # 设计令牌 + 客人端/商家端样式
+├── miniapp/                      # Taro 小程序端（骨架，S4 迁移中）
+│   ├── config/                   # Taro 编译配置（dev / prod）
+│   └── src/
+│       ├── pages/store/          # 客人端门店页（扫普通链接码解析 slug+ref）
+│       ├── package-admin/        # 商家后台分包（首页占位，table→flex 行迁移规则）
+│       ├── package-staff/        # 店员分包（服务请求待办 + 订阅消息）
+│       ├── utils/                # http（token 注入）/ storage（Taro 同步缓存）/ lang
+│       └── i18n/                 # 小程序端语种工具
+├── tools/                        # 独立验证工具（不进 make 常规链）
+│   ├── indep_byte_uat.sh         # 独立字节级 UAT（68 条，另起一套断言）
+│   └── check_doc_comments.py     # 导出面中文文档注释门禁（棘轮 + selftest）
 ├── docs/API.md                   # 接口契约
 ├── Makefile
 └── .env.example
@@ -213,6 +233,9 @@ langcross-merchant-app/
 16. **凭据只归超管**：LLM 凭据由平台超管统一维护、密文落库（AES-256-GCM）；明文只在「创建后 / 轮换后 / reveal」三个一次性响应里出现，列表与审计只存脱敏串。
 17. **翻译 Key 是超管专属**：能言 Key 的增删改查（连列表）只归超管——租户管理员连脱敏列表都看不到。Key 是平台成本凭据，对租户没有实际用途（他既不能用也不能改），索性不看，少一个信息暴露面。服务端翻译链按租户解析 Key 的逻辑不经过后台接口。
 18. **图片是替换不是追加**：菜品图片上传走「同字段覆盖」——新图落盘后删旧文件；写库失败必须回滚删掉刚落的文件，否则会留孤儿文件。文件名用 32 位随机 hex，「知道文件名 = 能看图」，故不另加鉴权、也不在任何接口返回图片清单。
+19. **租户归属必须有主**（2026-10-19 Q3）：`store` / `org` / `translation_api_key` 的 `tenant_id` 必须是真实存在的租户（0007 起有外键）；`account` / `ai_credential` 允许空串表示**平台级**（超管账号、平台默认 LLM 凭据），但非空就必须存在（触发器校验）。写门店归属一律走 `effectiveTenant(r, acc)`，**不要直接拿 `acc.TenantID`**——超管是空串，会写出一条谁都看不见的「无主门店」。删租户前必须先清账号与凭据（守卫会挡）；`org` 例外，它随租户级联删除。`admin_audit` 刻意不加约束：审计要活过租户。
+20. **状态报告只报事实**（2026-10-19 Q2）：健康检查与启动日志的翻译字段必须分开说「配了什么」（`translate_engine`）与「连得上吗」（`translate_reachable`）。翻译链配成黑洞地址时要如实报 `dict-stub` / `不可达`，**不许因为装配自带词典兜底就报 `live`**——装配成功 ≠ 引擎可用。
+21. **导出符号必须有中文文档注释**（2026-10-20）：Go 的导出函数 / 方法 / 类型、TS 的导出函数 / 常量 / 接口，紧邻上一行必须是中文 `//` 注释，写用途与边界，**不许复述符号名**。门禁 `tools/check_doc_comments.py`（`make doc-comments`）棘轮守住：新代码欠账就 exit 1。
 
 ---
 
@@ -225,8 +248,8 @@ langcross-merchant-app/
 | `LC_ADDR` | `:8080` | HTTP 监听 |
 | `LC_DATABASE_URL` | `postgres://localhost:5432/langcross?sslmode=disable` | DSN |
 | `LC_PUBLIC_BASE_URL` | `http://localhost:8080` | 生成门店页 URL / 二维码内容 |
-| `LC_SECRET` | 开发用占位值 | token 签名密钥，同时派生 AI/翻译凭据的 AES-256-GCM 加密密钥，**生产必须换**（更换后旧凭据需重新录入） |
-| `LC_DEV` | `1` | 开发模式：验证码固定 `000000` 并回显 |
+| `LC_SECRET` | 开发用占位值 | token 签名密钥，同时派生 AI/翻译凭据的 AES-256-GCM 加密密钥，**生产必须换**（更换后旧凭据需重新录入）；生产模式下仍是占位值或不足 32 字符将拒绝启动 |
+| `LC_DEV` | 不设（生产模式） | 开发模式：验证码固定 `000000` 并回显。**只有显式设为 `1` 才开启**——忘了设的生产部署不会因此敞开登录（2026-10-19 审计 P0-4） |
 | `LC_OCR_URL` | 空 | PaddleOCR 微服务；空则走 stub |
 | `LC_TRANSLATE_URL` | 空 | 既有翻译链（生产首选）；空则走 MyMemory |
 | `LC_MT_EMAIL` | 空 | MyMemory 联系邮箱（可选，提升免费配额） |
