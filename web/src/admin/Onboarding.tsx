@@ -34,6 +34,7 @@ import {
   type Store,
   type StoreLinks,
 } from '../api/client'
+import { QrImage } from './QrImage'
 
 /**
  * 示例菜单：用于本地无 OCR 服务时快速演示后续步骤。
@@ -639,24 +640,8 @@ function Step5({
  *
  * @param url 二维码接口地址（StoreLinks.qr_door / qr_table）
  */
-function QrImage({ url }: { url: string }) {
-  const [src, setSrc] = useState('')
-  useEffect(() => {
-    // alive 标记：组件卸载后不再 setState，避免 React 告警
-    let alive = true
-    const token = tokenStore.get()
-    fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-      .then((r) => r.blob())
-      .then((b) => {
-        if (alive) setSrc(URL.createObjectURL(b))
-      })
-      .catch(() => undefined)
-    return () => {
-      alive = false
-    }
-  }, [url])
-  return src ? <img src={src} alt="二维码" /> : <div className="lc-dim" style={{ padding: 60 }}>生成中…</div>
-}
+// QrImage 已抽到 ./QrImage（原先本文件与 AdminApp 各有一份逐字重复的副本，
+// 且都漏了 URL.revokeObjectURL）。现在两处共用同一个实现。
 
 /**
  * 把本地图片文件读成 base64 字符串（去掉 dataURL 前缀，只留纯数据段）。

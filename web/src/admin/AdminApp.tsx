@@ -45,6 +45,7 @@ import {
 import RequestsTab from './RequestsTab'
 import AICredentialsTab from './AICredentialsTab'
 import PlatformTab from './PlatformTab'
+import { QrImage } from './QrImage'
 
 /**
  * 管理台根组件：只做一件事——「有 token 就给控制台，没 token 就给登录页」。
@@ -904,21 +905,6 @@ function SettingsTab({ store, onSaved }: { store: Store; onSaved: () => void }) 
  *
  * 实现细节：用 alive 标记防止组件已卸载后仍 setState（避免 React 告警）。
  */
-function QrImage({ url }: { url: string }) {
-  const [src, setSrc] = useState('')
-  useEffect(() => {
-    let alive = true
-    const token = tokenStore.get()
-    fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-      .then((r) => r.blob())
-      .then((b) => {
-        if (alive) setSrc(URL.createObjectURL(b))
-      })
-      .catch(() => undefined)
-    return () => {
-      alive = false
-    }
-  }, [url])
-  // 未拿到 blob 前显示占位文案；注意这里没有在卸载时 revoke 掉 objectURL。
-  return src ? <img src={src} alt="二维码" /> : <div className="lc-dim" style={{ padding: 60 }}>生成中…</div>
-}
+// QrImage 已抽到 ./QrImage（原先在 AdminApp 与 Onboarding 里各有一份逐字重复
+// 的副本，且都漏了 URL.revokeObjectURL——换门店时旧 blob 一直被浏览器持有）。
+// 现在两处共用同一个实现，漏一次只修一处。

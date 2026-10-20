@@ -26,6 +26,8 @@ set -uo pipefail
 
 B="${B:-http://127.0.0.1:8080}"
 W="${W:-http://localhost:5173}"
+# 仓库根（本脚本放在 tools/ 下，向上两级；用于断言部署产物这类非 HTTP 交付物）
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PSQL_BIN="${PSQL_BIN:-/opt/homebrew/bin/psql}"
 PY="${PY:-/Users/zhangzifei/.workbuddy/binaries/python/versions/3.13.12/bin/python3}"
 DSN="host=127.0.0.1 user=$(whoami) dbname=langcross"
@@ -134,9 +136,28 @@ eq "B4 /api 未知路径经代理返回 404" "404" "$(hc --noproxy '*' "$W/api/_
 case "$U" in *'"code"'*) ok "B4b 未知路由 404 是统一 JSON 信封";; *) bad "B4b 未知路由 404 为纯文本「${U}」（非统一信封，API 契约不一致）";; esac
 # B5 后端直连不服务 SPA
 eq "B5 后端直连 /s/ 返回 404 JSON" "404" "$(hc --noproxy '*' "$B/s/$SLUG")"
-# B6 压缩检查（生产缺口探针）
+# B6 压缩（P2-2）——2026-10-20 由 FIX-12 结案，且**结案的形态是改断言而不是改应用**：
+#   压缩归网关，应用层保持零依赖（理由见 deploy/nginx.conf 文件头）。因此这里拆成两条：
+#   B6a 锁「应用层确实不压缩」——反向断言，防止有人顺手在 Go 里加个 gzip 中间件，
+#       让压缩逻辑分裂到两处（那时网关再压一遍就是双重压缩，且没人会发现）；
+#   B6b 锁「网关配置真的开了压缩」——交付物内容断言，防止 nginx.conf 写了却漏掉
+#       gzip_types application/json（那样 API 响应照样不压，等于没交付）。
 CE=$(curl -s --noproxy '*' -D - -o /dev/null -H 'Accept-Encoding: gzip, br' "$B/api/translation/langs" | tr -d '\r' | awk 'tolower($1)=="content-encoding:"{print $2}')
-if [ -n "$CE" ]; then ok "B6 API 响应有压缩 ($CE)"; else bad "B6 API 无 gzip/br 压缩（Content-Encoding 缺失）"; fi
+if [ -z "$CE" ]; then ok "B6a 应用层不压缩（设计如此，零依赖原则，压缩在网关）"; else bad "B6a 应用层竟自行压缩 ($CE)：压缩逻辑分裂，网关会二次压缩"; fi
+NGX="$ROOT/deploy/nginx.conf"
+if [ ! -f "$NGX" ]; then
+  bad "B6b 缺部署产物 deploy/nginx.conf（P2-9 未交付）"
+else
+  # ★ nginx 指令可以跨行（gzip_types 后面跟了三行类型），单行 grep 必然漏——
+  #   先把换行折叠成空格再匹配。这类「断言写法不对导致假红」比缺功能更难查。
+  NGX1=$(/usr/bin/tr '\n' ' ' < "$NGX")
+  NGXG=$(printf '%s' "$NGX1" | /usr/bin/grep -cE 'gzip[[:space:]]+on;')
+  eq "B6b1 nginx 开启 gzip" "1" "$NGXG"
+  if printf '%s' "$NGX1" | /usr/bin/grep -qE 'gzip_types[^;]*application/json'; then ok "B6b2 gzip_types 覆盖 application/json（API 响应）"; else bad "B6b2 gzip_types 未覆盖 application/json——API 响应不会被压"; fi
+  if /usr/bin/grep -qE 'try_files[^;]*index\.html' "$NGX"; then ok "B6b3 SPA history fallback（客人端 /s/{slug} 深链）"; else bad "B6b3 缺 SPA fallback——桌码深链会 404"; fi
+  if /usr/bin/grep -qE 'proxy_pass[[:space:]]+http://langcross_api' "$NGX"; then ok "B6b4 /api 反代到上游 API"; else bad "B6b4 缺 /api 反代"; fi
+  if /usr/bin/grep -qE 'client_max_body_size' "$NGX"; then ok "B6b5 上传体积上限已配（>= 应用层 5MB）"; else bad "B6b5 缺 client_max_body_size——大图上传会被网关 413"; fi
+fi
 
 step "C) 分支/异常与错误信封统一性"
 # C1 无 token
@@ -189,11 +210,23 @@ print(json.loads(base64.urlsafe_b64decode(p+'=='*(-len(p)%4))).get('sub',''))" "
 ne "D2 token sub 非空" "$SUB"
 
 step "E) 多租户隔离（一次性租户，结束全回收）"
-# E1 超管登录（smoke_admin 提权的账号）
-curl -s --noproxy '*' -X POST "$B/api/auth/otp" -H 'Content-Type: application/json' -d '{"phone":"13800001234"}' > /dev/null
-SUP=$(curl -s --noproxy '*' -X POST "$B/api/auth/login" -H 'Content-Type: application/json' -d '{"phone":"13800001234","code":"000000"}' | jget 'd["token"]')
+# E1 超管登录
+# ★ 本脚本刻意不依赖 smoke_admin.sh 的副作用（那个脚本会把 13800001234 psql 提权）。
+#   2026-10-20 实测：清空业务数据后直接跑本脚本，E3/E3c/E4b/E8b 四条一起变红——
+#   看着像多租户回归，实际是「没有超管」：登录接口首次登录会建号（默认 manager、
+#   默认租户），于是 admin/* 一律 403、建出的账号门店全落默认租户。**环境缺口
+#   伪装成了功能回归**，这类假红比漏测更消耗信任。因此这里自提权，跑前无需任何前置。
+SUP_PHONE=13800001234
+curl -s --noproxy '*' -X POST "$B/api/auth/otp" -H 'Content-Type: application/json' -d "{\"phone\":\"$SUP_PHONE\"}" > /dev/null
+curl -s --noproxy '*' -X POST "$B/api/auth/login" -H 'Content-Type: application/json' -d "{\"phone\":\"$SUP_PHONE\",\"code\":\"000000\"}" > /dev/null # 首次登录即建号（默认 manager）
+Q "UPDATE account SET role='super_admin', tenant_id='' WHERE phone='$SUP_PHONE'" > /dev/null
+# 验证码一次性：重新登录前必须再取一次码（开发模式固定 000000，见 LC_DEV 说明）
+curl -s --noproxy '*' -X POST "$B/api/auth/otp" -H 'Content-Type: application/json' -d "{\"phone\":\"$SUP_PHONE\"}" > /dev/null
+SUP=$(curl -s --noproxy '*' -X POST "$B/api/auth/login" -H 'Content-Type: application/json' -d "{\"phone\":\"$SUP_PHONE\",\"code\":\"000000\"}" | jget 'd["token"]')
 ne "E1 超管 token" "$SUP"
 SAH="Authorization: Bearer $SUP"
+# 角色不烘焙进 token（载荷仅 {sub,exp}），提权后必须重新登录才生效——顺手锁住这条
+eq "E1b 提权即时生效（/api/me 回报 super_admin）" "super_admin" "$(curl -s --noproxy '*' "$B/api/me" -H "$SAH" | jget 'd["account"]["role"]')"
 
 # E2 造隔离租户（SQL 直插，ID 用 32-hex）
 TID=$("$PY" -c "import secrets;print(secrets.token_hex(16))")
@@ -240,20 +273,28 @@ C10=$(hc --noproxy '*' -X POST "$B/api/admin/accounts" -H "$AH" -H 'Content-Type
 eq "E10 manager 建 tenant_admin 账号被拒（403）" "403" "$C10"
 
 # E11 回收：删租户及其账号/门店，断言残留 0
-Q "DELETE FROM account WHERE phone='$T2PHONE'" > /dev/null
+# ★ 连同本段自己造的探针账号一起清（超管是本节自提权的，T2 商家是登录自动建号的，
+#   E10 的 13911112222 被 403 挡住本不该落库——一并断言，防止将来放宽权限时静默留脏）。
+PROBE_PHONES="'$SUP_PHONE','$T2PHONE','13911112222'"
+Q "DELETE FROM account WHERE phone IN ($PROBE_PHONES)" > /dev/null
 Q "DELETE FROM store WHERE id='$T2SID'" > /dev/null
 Q "DELETE FROM tenant WHERE id='$TID'" > /dev/null
 eq "E11a 回收后 tenant 残留 0" "0" "$(Q "SELECT count(*) FROM tenant WHERE id='$TID'")"
-eq "E11b 回收后 account 残留 0" "0" "$(Q "SELECT count(*) FROM account WHERE phone='$T2PHONE'")"
+eq "E11b 回收后 account 残留 0" "0" "$(Q "SELECT count(*) FROM account WHERE phone IN ($PROBE_PHONES)")"
 eq "E11c 回收后 store 残留 0" "0" "$(Q "SELECT count(*) FROM store WHERE id='$T2SID'")"
 
 step "F) 产品专项（代码审读发现的行为化确认）"
-# F1 客人助手降级源：无 LLM 凭据时应答 source 应为 rule/fallback（LLM 装配断链的行为确认）
+# F1 客人助手降级源：店里没有可用 LLM 凭据时，应答 source 应为 rule/fallback。
+# ★ 2026-10-20 FIX-7 已接线（按门店租户解析凭据）：这里的语义从「确认 LLM 未接线」
+#   变成「确认无凭据时确定性兜底」——探针店没配凭据，因此仍必须是 rule/fallback；
+#   一旦这里报 llm，说明要么有人给探针店配了凭据（那就该改断言前提），要么日限
+#   护栏失效。**走模型这条路本身由 Go 单测覆盖**（mock LLM server，见
+#   httpapi/handlers_guest_assist_test.go），本脚本只守降级面。
 GA=$(curl -s --noproxy '*' -X POST "$B/api/public/store/$SLUG/assist" -H 'Content-Type: application/json' -d '{"question":"有什么辣的菜"}')
 SRC=$(echo "$GA" | jget 'd["reply"]["source"]')
 ne "F1 客人助手有应答" "$(echo "$GA" | jget 'd["reply"]["content"]')"
-printf '     客人助手 source = %s（LLM 装配断链时应为 rule/fallback）\n' "$SRC"
-case "$SRC" in llm) bad "F1 客人助手竟走了 LLM（与代码审读结论矛盾，需复核）";; rule|fallback|flow) ok "F1 客人助手走确定性降级（source=${SRC}）——确认 LLM 未接线";; "") bad "F1 拿不到 source 字段: $(echo "$GA" | head -c 120)";; *) ok "F1 客人助手 source=$SRC";; esac
+printf '     客人助手 source = %s（无凭据的店应为 rule/fallback；配了凭据才是 llm）\n' "$SRC"
+case "$SRC" in rule|fallback|flow) ok "F1 无凭据走确定性降级（source=${SRC}）";; llm) bad "F1 无凭据却走了 LLM（凭据解析或日限护栏失效，需复核）";; "") bad "F1 拿不到 source 字段: $(echo "$GA" | head -c 120)";; *) ok "F1 客人助手 source=$SRC";; esac
 # F2 TM 跨租户共享：同一原文在 T1/T2 各翻一次，translation_cache 只应有 1 行
 UTXT="$TAG 特色烤鱼"
 Q "DELETE FROM translation_cache WHERE source_text='$(sqlesc "$UTXT")'" > /dev/null

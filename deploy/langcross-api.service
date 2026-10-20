@@ -1,0 +1,52 @@
+# ─────────────────────────────────────────────────────────────
+# LangCross 商家店端 API：systemd 单元
+#
+# 用法：
+#   sudo cp deploy/langcross-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now langcross-api
+#
+# ★ 生产必须显式给 LC_SECRET（会话 token 的 HMAC 密钥）。2026-10-19 起
+#   LC_DEV 默认关闭、且**绝不能**在生产设置——它会让验证码固定为 000000
+#   并随响应回显，等于任何人都能登录任意账号（见 config.go）。
+# ─────────────────────────────────────────────────────────────
+[Unit]
+Description=LangCross merchant API
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=langcross
+Group=langcross
+WorkingDirectory=/opt/langcross/server
+
+# 二进制由 `cd server && go build -o bin/api ./cmd/api` 产出
+ExecStart=/opt/langcross/server/bin/api
+
+# ── 环境变量 ─────────────────────────────────────────────
+# LC_SECRET         必填，会话 token 密钥（openssl rand -hex 32）
+# LC_ADDR           监听地址，默认 :8080（nginx 反代到这里）
+# LC_DATABASE_URL   Postgres DSN
+# LC_TRANSLATE_URL  自建翻译链；不设则走 MyMemory 公共链
+# LC_UPLOAD_DIR     菜品图片落盘目录
+Environment=LC_ADDR=:8080
+Environment=LC_UPLOAD_DIR=/opt/langcross/data/uploads
+EnvironmentFile=/etc/langcross/api.env
+
+# ── 重启策略 ─────────────────────────────────────────────
+Restart=on-failure
+RestartSec=3
+# 优雅停机：进程收到 SIGTERM 后会跑完 Shutdown（10s 宽限）再退出，
+# 给在途请求与埋点 sink 一个收尾窗口（见 cmd/server/main.go）
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# ── 加固 ────────────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# 图片目录与日志需要可写
+ReadWritePaths=/opt/langcross/data/uploads /var/log/langcross
+
+[Install]
+WantedBy=multi-user.target
