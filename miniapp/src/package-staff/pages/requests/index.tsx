@@ -52,7 +52,18 @@ export default function StaffRequestsPage() {
   const askSubscribe = async () => {
     if (!SUBSCRIBE_TEMPLATE_IDS.length) return
     try {
-      await requestSubscribeMessage({ tmplIds: SUBSCRIBE_TEMPLATE_IDS })
+      // ★ Taro 4.3 的类型缺陷，只能在这里绕：
+      //   requestSubscribeMessage 的 BaseOption 把 tmplIds 与 entityIds **都声明成必填**
+      //   （见 @tarojs/taro types/api/open-api/subscribe-message.d.ts），
+      //   而它的 Option = AtLeastOne<BaseOption, 'tmplIds' | 'entityIds'> 本意是
+      //   「至少给一个」——但 BaseOption 本身两个都要，所以那个 AtLeastOne 根本没起作用。
+      //   微信端（weapp）只用 tmplIds，entityIds 是支付宝的字段。
+      //   ⇒ 这里显式收窄成微信形态，**不要为了过类型而给运行时塞一个空 entityIds**：
+      //     那会把一个无意义字段发给微信，纯属为了让编译器闭嘴而改运行时行为。
+      const opt = { tmplIds: SUBSCRIBE_TEMPLATE_IDS } as unknown as Parameters<
+        typeof requestSubscribeMessage
+      >[0]
+      await requestSubscribeMessage(opt)
     } catch {
       /* 用户拒绝或环境不支持时静默跳过，不阻塞主流程 */
     }

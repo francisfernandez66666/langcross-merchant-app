@@ -448,11 +448,12 @@ func (s *Server) translateCategories(ctx context.Context, from string, cats, tar
 	if len(cats) == 0 {
 		return nil
 	}
+	// 各语种并发翻；分类对各语种是同一批文本，直接用共用那一层
+	perLang := translateAllTargets(ctx, s.tr, cats, from, targets)
 	out := map[string]map[string]string{}
-	for _, tg := range targets {
-		res, err := s.tr.Translate(ctx, cats, from, tg)
-		// 该语种整批失败且无任何结果：跳过，不影响其它语种
-		if err != nil && len(res) == 0 {
+	for li, tg := range targets {
+		res := perLang[li]
+		if len(res) == 0 {
 			continue
 		}
 		m := map[string]string{}
@@ -533,8 +534,17 @@ func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {
 	dishes := s.dishesFromDraft(r.Context(), st.ID, picked)
 
 	// 逐语种翻译：已有译文的跳过（省配额，也避免覆盖人工校对过的结果）
-	translatedTotal := 0
-	for _, tg := range targets {
+	//
+	// ★ 翻译这一段单独套截止时间：外部翻译引擎不受我们控制，不套就可能被无限挂住。
+	//   翻完立刻 cancel，后面的落库回到 r.Context()——
+	//   绝不能让「翻译慢」连带把「写库」也取消掉，那会留下翻译了却没落库的脏数据。
+	tctx, tcancel := withTranslateDeadline(r.Context())
+	// 每个语种要翻的菜不一样（已有译文的跳过），所以不能用共用那一层
+	// translateAllTargets，只能自己按语种编排：
+	// 先在各自 goroutine 里收集（只写自己的下标），Wait 之后再统一回填。
+	perIdx := make([][]int, len(targets))
+	perLang := make([][]string, len(targets))
+	forEachTargetParallel(targets, func(li int, tg string) {
 		// 只把该语种缺失的菜名送去翻译，并记下它们在 dishes 中的下标以便回填
 		var idx []int
 		var texts []string
@@ -545,17 +555,23 @@ func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if len(texts) == 0 {
-			continue
+			return
 		}
-		out, terr := s.tr.Translate(r.Context(), texts, d.Lang, tg)
+		out, terr := s.tr.Translate(tctx, texts, d.Lang, tg)
 		// 整批失败且无结果：跳过该语种（其余语种与主流程不受影响）
 		if terr != nil && len(out) == 0 {
-			continue
+			return
 		}
+		perIdx[li] = idx
+		perLang[li] = out
+	})
+
+	translatedTotal := 0
+	for li, tg := range targets {
 		// 按下标回填；空串表示未命中，留空由前端回落显示原文——不编造
-		for j, i := range idx {
-			if j < len(out) && out[j] != "" {
-				dishes[i].Names[tg] = out[j]
+		for j, i := range perIdx[li] {
+			if j < len(perLang[li]) && perLang[li][j] != "" {
+				dishes[i].Names[tg] = perLang[li][j]
 				translatedTotal++
 			}
 		}
@@ -572,7 +588,8 @@ func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {
 
 	// 分类名同批多语化：否则客人端会出现「外语菜名 + 中文分类标题」的割裂页面
 	cats := distinctCategories(dishes)
-	catNames := mergeCategoryNames(st.CategoryNames, s.translateCategories(r.Context(), d.Lang, cats, targets))
+	catNames := mergeCategoryNames(st.CategoryNames, s.translateCategories(tctx, d.Lang, cats, targets))
+	tcancel() // 翻译全部结束，截止时间不再需要
 	if err := s.repo.UpdateStoreCategoryNames(r.Context(), st.ID, catNames); err != nil {
 		// 分类翻译失败不阻断主流程：菜名已多语化，分类回落原文即可
 		_ = err

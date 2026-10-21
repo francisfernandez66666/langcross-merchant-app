@@ -296,23 +296,27 @@ func (s *Server) handlePreviewTranslate(w http.ResponseWriter, r *http.Request) 
 	}
 	targets := normalizeTargets(req.Targets, req.To)
 
+	// ★ 整包截止时间：外部翻译引擎不受我们控制，没有它时引擎一慢
+	//   就能把这个请求无限挂住（前端 P4 的「下一步」会一直禁用）。
+	ctx, cancel := withTranslateDeadline(r.Context())
+	defer cancel()
+
 	// 先给每项建好空 Names，保证即使一个语种都没翻出来，前端也能拿到稳定的结构
 	for i := range req.Items {
 		req.Items[i].Names = map[string]string{}
 	}
-	for _, tg := range targets {
-		texts := make([]string, len(req.Items))
-		for i, it := range req.Items {
-			texts[i] = it.Name
-		}
-		translated, err := s.tr.Translate(r.Context(), texts, req.From, tg)
-		// 该语种整批失败且无结果：跳过，不影响其它语种
-		if err != nil && len(translated) == 0 {
-			continue
-		}
-		for i := range req.Items {
-			if i < len(translated) && translated[i] != "" {
-				req.Items[i].Names[tg] = translated[i]
+	texts := make([]string, len(req.Items))
+	for i, it := range req.Items {
+		texts[i] = it.Name
+	}
+	// 逐语种并发翻译 + 事后合并。
+	// ★ 不能在 goroutine 里直接写 req.Items[i].Names：那是并发写同一个 map，
+	//   Go 会直接 fatal error。所以先各自收集到 perLang[li]，Wait 之后再合并。
+	perLang := translateAllTargets(ctx, s.tr, texts, req.From, targets)
+	for li, tg := range targets {
+		for i, v := range perLang[li] {
+			if i < len(req.Items) && v != "" {
+				req.Items[i].Names[tg] = v
 			}
 		}
 	}
@@ -323,7 +327,7 @@ func (s *Server) handlePreviewTranslate(w http.ResponseWriter, r *http.Request) 
 
 	// 分类名同批预览：让商家在注册前就看到「分类标题 + 菜名」整体多语化后的样子
 	cats := distinctPreviewCategories(req.Items)
-	catNames := s.translateCategories(r.Context(), req.From, cats, targets)
+	catNames := s.translateCategories(ctx, req.From, cats, targets)
 
 	ok(w, map[string]any{
 		"ok":          true,

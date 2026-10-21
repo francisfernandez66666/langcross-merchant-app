@@ -18,6 +18,7 @@ set -u
 BASE="${BASE:-http://localhost:8081}"
 PSQL="${PSQL:-postgres://localhost:5432/langcross?sslmode=disable}"
 
+
 PASS=0
 FAIL=0
 eq() {
@@ -39,6 +40,21 @@ login() {
   curl --noproxy '*' -s -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
     -d "{\"phone\":\"$1\",\"code\":\"000000\"}"
 }
+
+echo "── 0. 前置检查：目标 API 确实在 $BASE 上 ──"
+# ★ 为什么必须有这一步：端口写错时（默认 8081，而开发服务常跑在 8080），
+#   后面二十多条断言会全部变红，报出来的是「平台管理功能全坏了」——
+#   真实原因只是连错了端口。宁可一行说清楚然后退出，
+#   也不要让二十多条假红把排障方向带偏。
+if ! curl --noproxy '*' -s --max-time 5 "$BASE/api/health" | grep -q '"ok"'; then
+  echo "  ✗ $BASE 上没有可用的 API（/api/health 无响应），终止"
+  echo "    先起服务（make api），或用 BASE 指定端口："
+  echo "      BASE=http://localhost:8080 bash scripts/smoke_admin.sh"
+  exit 1
+fi
+# ★ ${BASE} 的花括号不能省：bash 下 $BASE 紧跟全角括号时，
+#   变量名会被吞进后面那个多字节字符，set -u 直接报 unbound variable。
+eq "目标 API 可达（${BASE}）" "ok" "ok"
 
 echo "── 1. 建两个测试账号（dev OTP） ──"
 SUP_PHONE=13800001234

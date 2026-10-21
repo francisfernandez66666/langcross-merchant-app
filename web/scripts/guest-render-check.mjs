@@ -404,6 +404,71 @@ async function main() {
     return r.result.value
   }
 
+  /* ── DOM 交互辅助（按文案找钮 / 取标题） ──────────────────────
+     ★ 定义在 main() 里而不是模块顶层：它们要用上面这个闭包 evaluate。
+     ★ 按文案而不是按 class / 序号找钮：平台管理的教训是同一份文案可能出现在
+       多个层级（左侧导航也有「概览」），所以「点得对」靠调用方先圈定范围。 */
+  const clickByText = async (text) => {
+    // ★ 一律用「包含 / 正则 test」而不是全等：按钮文案在 JSX 里是换行的，
+    //   而且常带动态尾巴（「用示例菜单继续（11 道）」）、或排版箭头（「… →」）。
+    //   写死全等的话，文案一个标点没变、只是多了个箭头就会假红。
+    const isRe = text instanceof RegExp
+    const m = isRe
+      ? `new RegExp(${JSON.stringify(text.source)}).test(x.textContent.trim())`
+      : `x.textContent.trim().includes(${JSON.stringify(text)})`
+    // ★ 命中多个就报错，不静默点第一个：否则「上一步」和「下一步」文案相近时
+    //   会点错钮，测试还是绿的——那就等于在骗自己。
+    const label = JSON.stringify(isRe ? text.source : text)
+    await evaluate(`(() => {
+      const all = Array.from(document.querySelectorAll('button')).filter((x) => ${m})
+      if (all.length === 0) throw new Error('找不到按钮：' + ${label})
+      if (all.length > 1) throw new Error('按钮文案不唯一：' + ${label} + '（命中 ' + all.length + ' 个）')
+      all[0].click()
+    })()`)
+  }
+  const h1Text = async () => evaluate(`document.querySelector('h1')?.textContent.trim() ?? null`)
+
+  /**
+   * 等某个按钮从 disabled 变可用（不点）。
+   * ★ 为什么不能用固定 sleep：P4 的「下一步」在预览接口返回前一直是禁用的，
+   *   接口一慢就「点了没反应、还不抛错」——测试照样绿，
+   *   结果是这条最该守的主流程从来没被真正走过。
+   * ★ 超时前先把原因查出来：否则只会看到一句干巴巴的超时，
+   *   不知道是接口报错还是真的在慢，排障全靠猜。
+   */
+  const waitEnabled = async (text, ms = 20000) => {
+    const lit = JSON.stringify(text)
+    const t0 = Date.now()
+    for (;;) {
+      const st = await evaluate(`(() => {
+        const b = Array.from(document.querySelectorAll('button'))
+          .find((x) => x.textContent.trim().includes(${lit}))
+        if (!b) return 'missing'
+        return b.disabled ? 'disabled' : 'ready'
+      })()`)
+      if (st === 'ready') return
+      if (st === 'missing') throw new Error('找不到按钮：' + text)
+      if (Date.now() - t0 > ms) {
+        const why = await evaluate(`(() => {
+          const t = document.body.textContent
+          return {
+            err: document.querySelector('.lc-alert--err')?.textContent ?? null,
+            noTarget: t.includes('至少勾选一个语种'),
+            generating: t.includes('正在生成'),
+            mlCards: document.querySelectorAll('.ml-card').length,
+          }
+        })()`)
+        throw new Error('按钮一直不可用（超时 ' + ms + 'ms）：' + text + ' 原因=' + JSON.stringify(why))
+      }
+      await sleep(250)
+    }
+  }
+  /** 等可用后再点：把「等待」和「点击」分开，是为了能在两者之间插断言。 */
+  const clickWhenEnabled = async (text, ms = 20000) => {
+    await waitEnabled(text, ms)
+    await clickByText(text)
+  }
+
   const goto = async (url) => {
     jsErrors.length = 0
     await cdp.send('Page.navigate', { url })
@@ -778,6 +843,129 @@ async function main() {
     }
     eq('平台管理交互全程无 JS 异常', 0, jsErrors.length)
   }
+
+  /* ── FIX-13 第二半：商家上线引导流 P1→P5 ────────────────────
+     2026-10-21 Onboarding.tsx 从 661 行拆成「根组件 + 五个步骤 + 共用工具」
+     八个文件。与平台管理同理：tsc 只证明类型对、build 只证明模块解析对，
+     都不证明**五个步骤点下去真的能走通**。这条流程还是获客转化的主路径
+     （商家几分钟内从纸质菜单到多语菜单上线），走不通等于获客断流。
+
+     ★ 为什么必须走到 P5 并真的提交：P5 是「登录 → 建店 → 存草稿 →
+     确认原文稿 → 翻译」的顺序依赖链，任一步顺序错了都会留下半成品门店
+     或「译了但没确认」的脏数据——而那正是纪律 2 要防的。 */
+  step('10) 商家上线引导流：P1 算损失 → P5 上线成功（FIX-13 拆分的回归网）')
+  const ONB_PHONE = process.env.ONB_PHONE || '13800000077'
+  await cdp.send('Page.navigate', { url: `${WEB}/admin/onboarding` })
+  await sleep(600)
+
+  // P1：标题 + 三个本地输入 + 一个月度流失估算（纯本地算术，不发请求）
+  const p1 = await evaluate(`(() => {
+    const h = document.querySelector('h1')
+    return {
+      title: h ? h.textContent.trim() : null,
+      inputs: document.querySelectorAll('.lc-card input.lc-input').length,
+      steps: document.querySelectorAll('.lc-step').length,
+    }
+  })()`)
+  eq('P1 标题是「算损失」', '算损失', p1.title)
+  eq('P1 有三个本地输入（桌数/人均/流失比例）', 3, p1.inputs)
+  eq('顶部进度条五格', 5, p1.steps)
+
+  // 改一个输入，验证本地估算跟着变（证明 P1 是纯本地计算，不依赖接口）
+  // ★ 变量名带 p1 前缀：step 5 里已经有一个 before/after（评价弹层），同名会撞
+  const p1Before = await evaluate(`document.body.textContent.match(/¥[\\d,]+/)?.[0] ?? null`)
+  await evaluate(`(() => {
+    const ins = document.querySelectorAll('.lc-card input.lc-input')
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+    setter.call(ins[0], '20')
+    ins[0].dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await sleep(300)
+  const p1After = await evaluate(`document.body.textContent.match(/¥[\\d,]+/)?.[0] ?? null`)
+  eq('改桌数后月度估算跟着变（纯本地计算）', true, p1Before !== null && p1After !== null && p1Before !== p1After)
+
+  // P1 → P2
+  await clickByText('看看怎么挽回')
+  await sleep(500)
+  eq('P2 标题是「上传菜单」', '上传菜单', await h1Text())
+
+  // P2：OCR 在本地是 stub，走「用示例菜单继续」这条保底路径
+  // （这条路径本身就是容错设计：识别不可用时也不能让商家卡住）
+  await clickByText('用示例菜单继续')
+  await sleep(500)
+  eq('P3 标题是「挑要翻译的菜」', '挑要翻译的菜', await h1Text())
+  const picked = await evaluate(`document.body.textContent.match(/生成多语菜单（(\\d+) 道）/)?.[1] ?? null`)
+  eq('P3 示例菜单已带入且默认全选（11 道）', '11', picked)
+
+  // P3 → P4：一道都没勾会被禁用，这里默认全选所以能过
+  await clickByText(/^生成多语菜单（\d+ 道）→$/)
+  // P4 一挂载就要打语种注册表 + 预览接口，给足时间
+  await sleep(1500)
+  eq('P4 标题是「核心多语言」', '核心多语言', await h1Text())
+
+  // P4：语种清单必须来自后端注册表（纪律 12：前端不硬编码）
+  // ★ 语种是 <button> 标签（可点选的胶囊），不是 <input type=checkbox>——
+  //   按 checkbox 数会恒等于 0，断言就永远是对的假绿灯。
+  // ⇒ 断言出现的语种数 > 我们默认勾选的 3 个，证明不是写死的
+  const langCount = await evaluate(
+    `document.querySelectorAll('.lc-card button.lc-btn--sm').length`,
+  )
+  eq('P4 语种来自后端注册表（> 默认勾选的 3 个）', true, langCount > 3)
+  // 等预览出结果（这个钮在预览返回前是禁用的），再断言译文，最后才进 P5
+  // ★ 等 60 秒而不是默认的 20 秒：冷缓存时「11 道菜 + 5 分类」× 3 语种
+  //   要打几十次外部翻译引擎往返，服务端给的整包截止时间是 45 秒。
+  //   只等 20 秒的话，冷缓存下这条会假红——而它红起来看着像功能坏了，
+  //   其实是测试没给够时间。
+  await waitEnabled('注册后即可对外使用', 60000)
+  // ★ 预览卡片是 .ml-card，不是 .lc-card：按 .lc-card 找永远命中 0 条，
+  //   断言就变成一条「结构上恒真的假绿灯」。
+  // 译文质量依赖机器翻译，没配 AI 凭据时仍会走词典引擎，所以这条可以硬断言。
+  const previewNames = await evaluate(
+    `Array.from(document.querySelectorAll('.ml-card')).map((c) => c.textContent).join('|')`,
+  )
+  eq('P4 多语预览真的翻出了译文（免登录预览接口生效）', true, /Kung Pao|KungPao|ゴンバオ|공바오/.test(previewNames))
+  eq('P4 每个语种一列（默认 3 个语种）', 3, await evaluate(`document.querySelectorAll('.ml-card').length`))
+  // 译文旁边必须跟着中文原文作为对照真值（纪律：原文只作辅助，但必须有）
+  eq('P4 译文旁都带中文原文对照', true, await evaluate(`document.querySelectorAll('.ml-card .ml-zh').length >= 11`))
+
+  // P4 → P5
+  await clickByText('注册后即可对外使用')
+  await sleep(500)
+  await sleep(500)
+  eq('P5 标题是「注册解锁」', '注册解锁', await h1Text())
+
+  // P5：登录 → 建店 → 存草稿 → 确认 → 翻译。开发模式验证码固定 000000。
+  // ★ 按 placeholder 定位输入框，不按序号/类型：三个框都是 text，
+  //   按序号填会把手机号写进「店名」，后面的请求全都 400，报出来的错
+  //   看着像后端问题，其实是测试自己填错了。
+  const fill = (ph, v) => `(() => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+    const el = document.querySelector('input[placeholder=' + ${JSON.stringify(JSON.stringify(ph))} + ']')
+    if (!el) throw new Error('找不到输入框：${ph}')
+    setter.call(el, ${JSON.stringify(v)})
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`
+  await evaluate(fill('13800000000', ONB_PHONE))
+  await sleep(200)
+  // 按钮实际文案是「获取验证码」，我原来写的「发送验证码」根本不存在
+  await clickWhenEnabled('获取验证码')
+  await sleep(1200)
+  // 开发模式会把验证码回显在提示里（LC_DEV=1），直接取；取不到就用固定值
+  const devCode = await evaluate(
+    `(document.body.textContent.match(/开发模式：(\\d{6})/)?.[1]) ?? '000000'`,
+  )
+  await evaluate(fill('6 位数字', devCode))
+  await sleep(300)
+  await clickWhenEnabled('注册并上线')
+  // 上线链要打四五个接口，给足时间
+  for (let i = 0; i < 60; i++) {
+    await sleep(250)
+    if (await evaluate(`/上线成功/.test(document.body.textContent)`)) break
+  }
+  eq('★ P5 走完整条链并显示「上线成功」', true, await evaluate(`/上线成功/.test(document.body.textContent)`))
+  const qrImgs = await evaluate(`document.querySelectorAll('img[alt="二维码"]').length`)
+  eq('上线成功页展示双码（门口码 + 桌码）', 2, qrImgs)
+  eq('引导流全程无 JS 异常', 0, jsErrors.length)
 
   /* ── 收尾 ─────────────────────────────────────────────────── */
   cdp.close()

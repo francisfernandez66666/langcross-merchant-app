@@ -1,4 +1,8 @@
-import { defineAppConfig } from '@tarojs/taro'
+// ★ 这里**故意没有 import**：defineAppConfig 在 Taro 4 里是全局声明
+// （@tarojs/taro 的 types/index.d.ts 用 `declare global { const defineAppConfig }`
+// 暴露，而模块本身是 `export = Taro`，并没有这个命名导出）。写成
+// `import { defineAppConfig } from '@tarojs/taro'` 会报 TS2305「没有导出成员」。
+// 全局之所以可见，靠的是 tsconfig 的 "types": ["@tarojs/taro"]。
 
 // ★ 分包策略（主包上限 2MB）：
 //   1. 客人端门店页必须在主包 —— 它是扫码直达入口，放分包会出现白屏。
