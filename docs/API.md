@@ -213,7 +213,7 @@ LLM 凭据由平台超管统一维护、密文落库（`LC_SECRET` 派生的 AES
 | `server/scripts/smoke.sh` | 28 步、77 条断言。含语种注册表、一次 5 语种翻译、分类名多语化、注册前多语预览、券面本地化、评分契约、跨店核销拒绝、双码 PNG 魔数、客人端 AI 点菜助手（RAG 检索）、服务请求全链路（发起/待办/标记完成）、AI 凭据 RBAC 守卫、翻译 Key RBAC 守卫（普通商家连列表都 403）、菜品图片（上传/公开访问 PNG 魔数/删除 404）、**Q1 确认即落库 + 商户未翻译提醒** |
 | `server/scripts/smoke_admin.sh` | 23 条断言。超管正例：psql 提权 → 租户 CRUD、账号管理、翻译 Key（超管专属，脱敏+启停）、AI 凭据（can_write）、经理 vs 超管权限对照 403、审计留痕 |
 | `server/scripts/smoke_offline.sh` | 32 条断言。翻译链指向不可达地址 → 确定性验证内置词典兜底与「绝不编造」纪律；并回归健康检查诚实口径（黑洞地址必须报 `translate_reachable=false` / `translate_mode=dict-stub`） |
-| `web/scripts/guest-render-check.mjs` | 61 条稳定断言 + 1 条机翻质量条件断言（按设计可跳过）。真开无头浏览器，验证客人端渲染纪律与语言切换、零译文店夹具、AI 助手面板交互、商家端未翻译提醒横幅 |
+| `web/scripts/guest-render-check.mjs` | 74 条稳定断言 + 1 条机翻质量条件断言（按设计可跳过）。真开无头浏览器，验证客人端渲染纪律与语言切换、零译文店夹具、AI 助手面板交互、商家端未翻译提醒横幅，以及**平台管理五个分区逐一点开并渲染**（FIX-13 拆分的回归网——纯搬运拆分编译过不代表渲染得出来） |
 | `tools/indep_byte_uat.sh` | 75 条断言，**全绿**。独立字节级 UAT，不复用上面任何脚本；含 0007 租户外键三档语义的 G1–G10。B6（压缩）已按「压缩归网关」结案并拆成两条：B6a 反向断言应用层**确实不**压缩（防止压缩逻辑分裂到两处），B6b 断言 `deploy/nginx.conf` 真开了 gzip 且覆盖 `application/json`、有 SPA fallback 与 `/api` 反代。脚本**自带环境自证并自行提权**，不依赖先跑过别的脚本 |
 | `tools/check_doc_comments.py` | 导出面中文文档注释门禁（棘轮）：新增导出符号不补注释就 exit 1；`make doc-comments` 或 `make test` 会跑 |
 | `go test ./...`（单测） | Go 单测：助手引擎、守卫链、凭据加解密、配置、翻译链与租户 Key、**withAuth / requireRole / effectiveTenant / withRecover 中间件**、**租户隔离（他租户 403、列表作用域必须进 SQL WHERE、超管跨租户 403 是设计）**、**后台门禁（整条 admin 路由面逐条过角色门禁 + 防提权 + superKeyAdmin 四态）**、**商家主链路（未确认不许翻译、建店归属走 effectiveTenant、重新确认继承售罄/译文、枚举白名单）**、**AI 凭据归属口径（记录型假 SQL 驱动断言 WHERE）**、**客人助手 LLM 接线（mock LLM server）**、**CanAccessStore 五级角色矩阵**。当前覆盖率：总 **39.1%**、httpapi **36.2%**（原目标 35% / 30%，已达标） |

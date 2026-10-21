@@ -112,7 +112,7 @@ bash server/scripts/seed_demo.sh          # 结束时会打印门店页 URL
 | `make test` | — | 无 | Go 单测（兜底链路 / 语种注册表 / 接口工具函数 / 中间件 / 租户隔离 / 后台门禁 / 商家主链路）+ `gofmt` / `go vet` / `tsc --noEmit` + 导出面中文文档注释门禁（`tools/check_doc_comments.py`，棘轮：新导出符号不补注释就红）。覆盖率约 **总 39% / httpapi 36%** |
 | `make smoke` | 77 | 后端 `:8080` | 端到端 28 步：健康检查 → 语种注册表 → 认证 → 建店（自动配券+双码）→ 保存确认稿 → **未确认拒绝翻译** → 确认 → **一次 5 语种多语化** → 译文落库 → **分类名多语化** → **注册前多语预览** → 公开门店页 → 评价领券（含**券面本地化**）→ **评分契约** → 核销 → 重复核销拒绝 → **跨店核销拒绝** → 经营洞察 → 双码 PNG 魔数 → **客人端 AI 点菜助手（RAG 检索）** → **服务请求全链路**（客人发起 / 商家待办 / 标记完成 / 待办下降）→ **AI 凭据 RBAC 守卫** → **翻译 Key RBAC 守卫**（超管专属，普通商家连列表都 403）→ **菜品图片**（上传 / 公开访问 PNG 魔数 / 删除 404） |
 | `make smoke-offline` | 32 | 另起 `:8099`（`make api-offline`） | 把翻译链指向不可达地址 → 确定性验证**内置词典兜底**与「**绝不编造**」纪律（未收录词必须留空、词典只覆盖中→英、其它语种不得回填原文）；并回归**健康检查诚实口径**（黑洞地址必须报 `translate_reachable=false` / `translate_mode=dict-stub`，而不是谎报 live） |
-| `make render-check` | 61+1 | 后端 + 前端 dev server | **真开无头浏览器**，用 CDP 断言客人端渲染纪律 L1–L6、语言选择器 10 项、切语言同步 `<html lang>`、缺译文标注，并回归「评价弹层一打开整页崩」的 React 保留属性 P0 事故；含**零译文店夹具**（确认即有菜单、未翻译如实标注而非谎称机器翻译）、**AI 助手面板**交互，以及**商家端未翻译提醒横幅**（零译文弹出、补翻后消失）。「+1」为机翻质量条件断言（回复是否提及菜单菜品），按设计可跳过 |
+| `make render-check` | 74+1 | 后端 + 前端 dev server | **真开无头浏览器**，用 CDP 断言客人端渲染纪律 L1–L6、语言选择器 10 项、切语言同步 `<html lang>`、缺译文标注，并回归「评价弹层一打开整页崩」的 React 保留属性 P0 事故；含**零译文店夹具**（确认即有菜单、未翻译如实标注而非谎称机器翻译）、**AI 助手面板**交互、**商家端未翻译提醒横幅**（零译文弹出、补翻后消失），以及**平台管理五个分区逐一点开并渲染**（FIX-13 拆分的回归网：tsc 只证明类型对、vite build 只证明模块解析对，都不证明点进去真的渲染出来了）。「+1」为机翻质量条件断言（回复是否提及菜单菜品），按设计可跳过 |
 | `bash scripts/smoke_admin.sh` | 23 | 后端（脚本默认 `:8081`，可用 `BASE=` 覆盖）+ 开发库 psql | 超管正例：psql 提权 → 租户 CRUD、账号管理、翻译 Key（超管专属：脱敏+启停）、AI 凭据（can_write）、经理 vs 超管权限对照 403、审计留痕。**只跑开发库**（提权是危险操作，脚本刻意不自动化） |
 
 ```bash
@@ -234,8 +234,14 @@ langcross-merchant-app/
 │       ├── guest/GuestAssistant.tsx # 客人端 AI 点菜助手抽屉（语音 + 文本 + 动作按钮）
 │       ├── guest/i18n.ts         # 客人端 10 语种词典 + 问店员短语
 │       ├── admin/AdminApp.tsx    # 商家端：概览/菜单(语种覆盖+图片)/券核销/洞察/服务请求/平台管理/AI凭据/设置
+│       ├── admin/PlatformTab.tsx # 平台管理外壳（按角色决定能看到哪些分区 + 二级 Tab 切换）
+│       ├── admin/platformHelpers.tsx # 平台管理各分区共用小工具（角色标签 / 相对时间 / 状态徽标）
+│       ├── admin/PlatformOverview.tsx    # 分区：平台概览（超管，四个总数）
+│       ├── admin/PlatformTenants.tsx     # 分区：租户增删改 + 展开看门店
+│       ├── admin/PlatformAccounts.tsx    # 分区：账号与角色（超管 / 租户管理员共用）
+│       ├── admin/PlatformTranslateKeys.tsx # 分区：翻译 Key（★ 超管专属，含试译 / 轮换 / 明文）
+│       ├── admin/PlatformAudit.tsx       # 分区：审计留痕
 │       ├── admin/RequestsTab.tsx # 服务请求处理台（轮询 + 完成/取消）
-│       ├── admin/PlatformTab.tsx # 平台管理：超管(概览/租户/翻译Key) + 租户管理员(账号/审计)
 │       ├── admin/AICredentialsTab.tsx # 平台 AI 凭据管理（超管；tenant_admin 只读）
 │       ├── admin/Onboarding.tsx  # 引导流 P1–P5（P4 支持多语种预览）
 │       └── styles/global.css     # 设计令牌 + 客人端/商家端样式
