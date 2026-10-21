@@ -793,7 +793,15 @@ func (s *Server) handleTestTranslateKey(w http.ResponseWriter, r *http.Request) 
 
 // friendlyLexicornError 把能言的错误码转成商家能行动的话。
 // 每条都给「下一步做什么」——只报错误码等于没报。
+//
+// ★ err 为 nil 时返回空串：调用方是「试译失败才有 err」的路径，但凡多绕一层
+// （比如并发收集结果时先建了 error 变量）就会传进 nil；原先直接 err.Error()
+// 会 panic，把一次「Key 不可用」的提示变成 500 + 一段 goroutine dump。
+// 宁可返回空串让上层走默认文案，也不要在这种辅助函数里炸掉。
 func friendlyLexicornError(err error) string {
+	if err == nil {
+		return ""
+	}
 	var ae *service.APIError
 	if !errors.As(err, &ae) {
 		return "试译失败：" + err.Error()
