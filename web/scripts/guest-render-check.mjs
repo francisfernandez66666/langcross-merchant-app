@@ -283,6 +283,52 @@ const ADMIN_PROBE = `(() => {
   }
 })()`
 
+/* ── 平台管理探针：把当前分区渲染出来的所有表格单元格与卡片标签摊平 ──
+   ★ 为什么取「所有单元格」而不是按分区写选择器：五个分区的表格结构相似
+     （.lc-card 里一张 .lc-table），按 class 挑会挑错；摊平后按文本断言，
+     分区按钮点对了、组件挂对了，表头就一定在。 */
+const PLATFORM_PROBE = `(() => {
+  const cells = Array.from(document.querySelectorAll('.lc-table th, .lc-table td'))
+    .map((e) => e.textContent.trim())
+    .filter(Boolean)
+  // 概览分区是卡片不是表格，标签在 .lc-card 里
+  const cards = Array.from(document.querySelectorAll('.lc-card .lc-dim'))
+    .map((e) => e.textContent.trim())
+    .filter(Boolean)
+  return { cells, cards }
+})()`
+
+/** 造一个超管账号并登录（FIX-13 平台管理渲染回归的前置）。
+ *
+ * 为什么必须 psql 提权：平台管理 Tab 只对 super_admin / tenant_admin 可见，
+ * 而登录接口只会建默认 manager。沿用 smoke_admin.sh 的做法——psql 把角色
+ * 改成 super_admin 且 tenant_id 置空（平台级）。提权后必须**重新取验证码
+ * 再登录**：角色不烘焙进 token，旧 token 仍是 manager 身份。
+ *
+ * @returns {Promise<{token: string}|null>} 成功返回 token；psql 不可用时返回 null（调用方跳过）
+ */
+async function seedSuperAdminFixture() {
+  const phone = process.env.SUPER_PHONE || '13800001234'
+  const psqlBin = process.env.PSQL_BIN || '/opt/homebrew/bin/psql'
+  const dsn = process.env.PSQL_DSN || `-h 127.0.0.1 -U ${process.env.USER || process.env.LOGNAME || 'postgres'} -d langcross`
+  try {
+    await api('/api/auth/otp', { method: 'POST', body: { phone } })
+    const first = await api('/api/auth/login', { method: 'POST', body: { phone, code: '000000' } })
+    if (!first.token) throw new Error(`首次登录失败：${JSON.stringify(first)}`)
+    const { execFileSync } = await import('node:child_process')
+    execFileSync(psqlBin, [...dsn.split(' '), '-tAc',
+      `UPDATE account SET role='super_admin', tenant_id='' WHERE phone='${phone}'`], { stdio: 'ignore' })
+    // 角色变更即时生效，但 token 里的身份是旧的——重新登录拿新主体
+    await api('/api/auth/otp', { method: 'POST', body: { phone } })
+    const second = await api('/api/auth/login', { method: 'POST', body: { phone, code: '000000' } })
+    if (!second.token) throw new Error(`提权后登录失败：${JSON.stringify(second)}`)
+    return { token: second.token }
+  } catch (e) {
+    console.log(`      （超管夹具失败：${e.message}）`)
+    return null
+  }
+}
+
 /* ── 页面探针：在浏览器里执行，返回可断言的结构 ────────────────── */
 const PROBE = `(() => {
   const txt = (el) => (el ? el.textContent.trim() : null)
@@ -659,6 +705,79 @@ async function main() {
   const after = await evaluate(ADMIN_PROBE)
   eq('补翻后提醒消失（不打扰已上线的商家）', false, /还没有任何译文/.test(after.banner || ''))
   eq('商家端交互全程无 JS 异常', 0, jsErrors.length)
+
+  /* ── FIX-13：平台管理五个分区的渲染回归 ──────────────────────
+     2026-10-21 PlatformTab.tsx 从 860 行拆成「外壳 + 五个分区 + 共用工具」共
+     七个文件。这种纯搬运拆分，tsc 只证明「类型对」，vite build 只证明
+     「模块解析对」——都不证明「点进去真的渲染出来了」。
+     render-check 是这轮拆分**唯一的安全网**，所以在这里逐分区点一遍。 */
+  step('9) 平台管理：五个分区逐一点开并渲染（FIX-13 拆分的回归网）')
+  const sup = await seedSuperAdminFixture()
+  if (!sup) {
+    console.log('  \x1b[33m!\x1b[0m 拿不到超管（psql 不可用或未配置 DSN），跳过平台管理渲染断言')
+  } else {
+    await cdp.send('Page.navigate', { url: `${WEB}/admin` })
+    await sleep(400)
+    await evaluate(`localStorage.setItem('lc_token', ${JSON.stringify(sup.token)})`)
+    await cdp.send('Page.navigate', { url: `${WEB}/admin` })
+    let supAdmin = null
+    for (let i = 0; i < 60; i++) {
+      await sleep(150)
+      supAdmin = await evaluate(ADMIN_PROBE).catch(() => null)
+      if (supAdmin?.ready) break
+    }
+    eq('超管进入商家控制台', true, Boolean(supAdmin?.ready))
+    eq('超管能看到「平台管理」Tab', true, (supAdmin?.tabs || []).includes('平台管理'))
+
+    await evaluate(`(() => {
+      const b = Array.from(document.querySelectorAll('.admin-nav button')).find((x) => x.textContent.trim() === '平台管理')
+      if (!b) throw new Error('找不到「平台管理」Tab')
+      b.click()
+    })()`)
+    await sleep(500)
+
+    // 外壳要点：按角色过滤后的分区清单（超管应五个全见）
+    const secTabs = await evaluate(
+      `Array.from(document.querySelectorAll('.lc-stack > .lc-row button')).map((b) => b.textContent.trim())`,
+    )
+    for (const s of ['概览', '租户', '账号', '翻译 Key', '审计']) {
+      eq(`超管分区清单含「${s}」`, true, secTabs.includes(s))
+    }
+
+    // 逐个分区点开，断言各自的表头/卡片真的渲染出来。
+    // ★ 按表头文本断言而不是按行数：数据可能为空（刚清的库），但表头恒在。
+    // ★ 点按钮必须先圈定范围：商家端左侧导航也有「概览」，直接按文案找会点到
+    //   门店级 Tab 上去（第一次写就踩了这个坑，表现为概览分区「没渲染」）。
+    //   圈法是找「同时含五个分区名的那个 .lc-row」——那是平台管理的二级 Tab 行。
+    const SECTIONS = [
+      { name: '概览', headers: ['租户', '账号', '门店', '翻译 Key'] },
+      { name: '租户', headers: ['名称', '编码', '门店', '账号', '到期', '状态'] },
+      { name: '账号', headers: ['手机号', '姓名', '角色', '租户', '状态'] },
+      { name: '翻译 Key', headers: ['别名', '模式', 'Key', '日上限', '最近使用', '状态'] },
+      { name: '审计', headers: ['时间', '操作', '操作者', '目标', '详情'] },
+    ]
+    const clickSection = (name) =>
+      `(() => {
+        const row = Array.from(document.querySelectorAll('.lc-row')).find((r) => {
+          const ts = Array.from(r.querySelectorAll('button')).map((b) => b.textContent.trim())
+          return ['概览', '租户', '账号', '翻译 Key', '审计'].every((t) => ts.includes(t))
+        })
+        if (!row) throw new Error('找不到平台管理的分区 Tab 行')
+        const b = Array.from(row.querySelectorAll('button')).find((x) => x.textContent.trim() === ${JSON.stringify(name)})
+        if (!b) throw new Error('分区行里找不到「${name}」')
+        b.click()
+      })()`
+    for (const sec of SECTIONS) {
+      await evaluate(clickSection(sec.name))
+      await sleep(350)
+      const probe = await evaluate(PLATFORM_PROBE)
+      const got = [...(probe.cells || []), ...(probe.cards || [])]
+      const missing = sec.headers.filter((h) => !got.includes(h))
+      eq(`「${sec.name}」分区渲染出表头/卡片（${sec.headers.length} 项）`, true, missing.length === 0)
+      if (missing.length) bad(`「${sec.name}」缺少：${missing.join('、')}`)
+    }
+    eq('平台管理交互全程无 JS 异常', 0, jsErrors.length)
+  }
 
   /* ── 收尾 ─────────────────────────────────────────────────── */
   cdp.close()
