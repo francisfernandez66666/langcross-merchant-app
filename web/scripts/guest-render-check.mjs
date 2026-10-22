@@ -153,7 +153,10 @@ async function launchChrome() {
   // 轮询 /json/list 拿**页面级** WebSocket。
   // 注意：不要用 browser 级 WS 的 Target.createTarget —— 这条路径在本机
   // 反复出现握手后被断（1006），改用页面级通道稳定得多。
-  for (let i = 0; i < 150; i++) {
+  // ★ 等 40 秒而不是 15 秒：本机实测在负载较高时（跑过 go test -race、
+  //   vite build、批量种子数据之后 load 能到 100+），Chrome 冷启动会超过 15 秒。
+  //   只等 15 秒时报「启动超时」，看着像脚本坏了，其实只是机器忙。
+  for (let i = 0; i < 400; i++) {
     try {
       const r = await fetch(`http://127.0.0.1:${PORT}/json/list`)
       if (r.ok) {
@@ -166,7 +169,16 @@ async function launchChrome() {
     await sleep(100)
   }
   proc.kill('SIGKILL')
-  throw new Error('Chrome 启动超时（远程调试端口未就绪）')
+  // ★ 超时时先分清「Chrome 根本不存在」还是「只是起得慢」：
+  //   这两种情况的修法完全不同，报一样的错等于让人瞎猜。
+  if (!existsSync(CHROME)) {
+    throw new Error(`找不到 Chrome：${CHROME}\n  用 CHROME 环境变量指定，或先装 Playwright 的 Chrome for Testing`)
+  }
+  throw new Error(
+    `Chrome 启动超时（等了 40s，远程调试端口未就绪）。\n` +
+      `  已找到 Chrome：${CHROME}\n` +
+      `  常见原因是机器负载过高（刚跑过编译/构建），过一会重试通常就好。`,
+  )
 }
 
 /* ── 造测试数据（走公开接口，不碰数据库） ────────────────────── */
@@ -963,8 +975,21 @@ async function main() {
     if (await evaluate(`/上线成功/.test(document.body.textContent)`)) break
   }
   eq('★ P5 走完整条链并显示「上线成功」', true, await evaluate(`/上线成功/.test(document.body.textContent)`))
-  const qrImgs = await evaluate(`document.querySelectorAll('img[alt="二维码"]').length`)
+  // ★ 双码要「等」而不是「立刻数」：二维码是 QrImage 组件挂载后才 fetch blob
+  //   再转 objectURL，比成功页文字晚一拍。平时几十毫秒就好了，机器忙时
+  //   会晚很多——断言写在文字出现的那一刻，等于把测试绑在机器快慢上。
+  const QR_COUNT = `document.querySelectorAll('img[alt="二维码"]').length`
+  let qrImgs = 0
+  for (let i = 0; i < 80; i++) {
+    qrImgs = await evaluate(QR_COUNT)
+    if (qrImgs >= 2) break
+    await sleep(250)
+  }
   eq('上线成功页展示双码（门口码 + 桌码）', 2, qrImgs)
+  // 双码是「打印物料」，地址印出来就不可改，所以必须真的加载出图片而不是留占位
+  eq('双码都拿到了真实图片（不是占位/加载中）', 2, await evaluate(
+    `Array.from(document.querySelectorAll('img[alt="二维码"]')).filter((i) => i.src.startsWith('blob:')).length`,
+  ))
   eq('引导流全程无 JS 异常', 0, jsErrors.length)
 
   /* ── 收尾 ─────────────────────────────────────────────────── */

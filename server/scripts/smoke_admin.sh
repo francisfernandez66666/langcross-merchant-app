@@ -6,16 +6,22 @@
 #   - 本脚本跑**正例**：真超管的租户 CRUD、账号管理、翻译 Key（超管专属）、
 #     AI 凭据、审计，以及「经理 vs 超管」的权限对照。
 #
-# ★ 前置条件（本脚本刻意不自动化，因为提权是危险操作）：
-#   1. 服务已起：LC_ADDR=:8081 LC_DEV=1 /tmp/langcross-api（LC_SECRET 用默认开发值即可）；
+# ★ 前置条件（脚本自己会做「提权」，但刻意只在开发库上做，见下）：
+#   1. 服务已起：make api（即 LC_ADDR=:8080 LC_DEV=1）；
 #   2. 数据库可达：psql "postgres://localhost:5432/langcross?sslmode=disable"；
 #   3. 脚本会用 dev OTP 建两个测试账号，并把其中一个用 psql 提为 super_admin
 #      （UPDATE account SET role='super_admin', tenant_id='' WHERE phone=...）。
 #      这只是开发库操作；生产库永远不要跑本脚本。
 #
 # 用法：bash scripts/smoke_admin.sh   （在仓库根目录执行；BASE 可按需覆盖）
+#
+# ★ 2026-10-22：默认端口从 8081 改成 8080。
+#   8081 是早期手工起服务时用的临时端口，`make api` 用的是 8080。
+#   默认端口与实际不符时，二十多条断言会全部变红，
+#   报出来的是「平台管理功能全坏了」——真实原因只是连错了端口。
+#   现在开头加了 /api/health 前置检查，连不上会一句话说清楚再退出。
 set -u
-BASE="${BASE:-http://localhost:8081}"
+BASE="${BASE:-http://localhost:8080}"
 PSQL="${PSQL:-postgres://localhost:5432/langcross?sslmode=disable}"
 
 

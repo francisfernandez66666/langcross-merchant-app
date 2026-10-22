@@ -5,6 +5,9 @@ node_modules/
 dist/
 bin/
 
+# TypeScript 增量构建缓存（每次 build 都会变，且只对本机有效）
+*.tsbuildinfo
+
 # 环境变量（勿提交）
 .env
 .env.local
