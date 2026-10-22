@@ -18,6 +18,9 @@ bin/
 *.out
 /vendor/
 
+# 运行时产物：菜品图片上传目录（每次跑冒烟测试都会留下一张，勿提交）
+server/data/
+
 # 编辑器 / 系统
 .DS_Store
 .idea/

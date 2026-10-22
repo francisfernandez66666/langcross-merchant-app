@@ -3,7 +3,7 @@
 #
 # 造一家「菜品够多、分类够全、多语种全开」的店，用于人工验收客人端渲染。
 # ★ 前置后端须以 LC_DEV=1 开发模式启动（登录走固定验证码 000000）。
-# 用法：BASE=http://localhost:8080 bash scripts/seed_demo.sh [店名]
+# 用法（仓库根目录）：BASE=http://localhost:8080 bash server/scripts/seed_demo.sh [店名]
 set -uo pipefail
 
 B="${BASE:-http://localhost:8080}"

@@ -36,6 +36,12 @@
   超管管租户，租户管理员管自己人；`effectiveTenant` 在服务端收口「谁能看谁」。
 - **翻译引擎链**：租户配了能言 Key 走能言开放平台（按租户解析，失败即降级），
   否则走自建链 / MyMemory，再不成交给内置词典——整条链对菜品价格与菜名**绝不编造**。
+- **多语种并发编排**（FIX-14）：翻译是「每语种每批一次外部 HTTP 调用」，三个调用点原先都**串行**遍历语种，
+  11 道菜 × 3 语种 + 5 分类 = 48 次串行往返，冷缓存 20~30 秒；而 P4「下一步」要等预览返回才解禁，
+  商家看到的就是一张卡死的页面。现改为**语种间并发（上限 3）+ 整体 45 秒截止时间**，
+  冷缓存实测 20~30s → **9.7s**、热缓存 **1.5ms**，与页面「约十几秒」的提示对齐。
+  ★ 两个常量都不能随手调：并发上限 3 是因为公开引擎按 IP 限流，拉满会吃 429 然后一个词都翻不出来；
+  45 秒必须**小于**网关 `proxy_read_timeout 60s`——宁可我们自己先超时给出可读错误，也不要被网关砍断成 504。
 
 **明确不做**（二期）：在线支付、改收银、接 POS、外卖对接、多店后台。小程序端已起步（`miniapp/`，Taro 骨架：客人端门店页 / 商家后台首页 / 店员待办三页已迁移，其余 Tab 待 S4），不算「不做」也不算「做完」。
 
@@ -48,7 +54,7 @@
 | 后端 | **Go 1.22+**（标准库 `net/http`，方法+通配符路由） | 无 Web 框架依赖 |
 | 数据库 | **PostgreSQL** | 本期不上 pgvector，单店菜单用文本相似度足够 |
 | 前端 | **React 18 + TypeScript + Vite** | 客人端 H5 与商家端后台同一应用、按路由分端 |
-| 小程序 | **Taro 4 + React**（`miniapp/`） | 微信小程序端骨架：客人端门店页 / 商家后台首页 / 店员待办已迁移，其余 Tab 待 S4；表格改 flex 行、select 改 Picker（迁移规则见方案 §4.3） |
+| 小程序 | **Taro 4 + React**（`miniapp/`） | 微信小程序端骨架：客人端门店页 / 商家后台首页 / 店员待办已迁移，其余 Tab 待 S4；表格改 flex 行、select 改 Picker（迁移规则见方案 §4.3）。★ `npm run typecheck` 已归零（见「小程序端类型检查」一节） |
 | 二维码 | `github.com/skip2/go-qrcode` | 门口码 / 桌码 PNG |
 | OCR | **可插拔**：默认 stub（前端走手动保底）→ 生产接 Python PaddleOCR 微服务 | 服务端识别，端侧无 OCR |
 | 翻译 | **可插拔**：TM 缓存（`translation_cache`）→ 主引擎（租户配了能言 Key 走能言开放平台 → 否则 `LC_TRANSLATE_URL` 自建链／MyMemory）→ 内置中→英词典（离线兜底） | **10 语种**；词典未收录的词返回空，**不编造**；能言 Key 由超管在后台维护，密文落库 |
@@ -105,15 +111,17 @@ bash server/scripts/seed_demo.sh          # 结束时会打印门店页 URL
 
 ## 测试
 
-四套入口，共 **193 条断言**，全部可重复执行（另有 1 条机翻质量条件断言：回复是否提及菜单菜品，命中才计分，未命中按设计跳过）。
+四套入口，共 **225 条断言**（smoke 77 + 离线 32 + 渲染 92 + 超管 24），全部可重复执行。
+其中渲染那 92 条含 1 条机翻质量**条件**断言（回复是否提及菜单菜品，命中才计分，未命中按设计跳过）。
+另有独立 UAT 75 条（见下），不复用这四套里的任何断言，合计 **300 条**。
 
 | 命令 | 断言 | 前置 | 覆盖 |
 |---|---|---|---|
-| `make test` | — | 无 | Go 单测（兜底链路 / 语种注册表 / 接口工具函数 / 中间件 / 租户隔离 / 后台门禁 / 商家主链路）+ `gofmt` / `go vet` / `tsc --noEmit` + 导出面中文文档注释门禁（`tools/check_doc_comments.py`，棘轮：新导出符号不补注释就红）。覆盖率约 **总 39% / httpapi 36%** |
+| `make test` | — | 无 | Go 单测（兜底链路 / 语种注册表 / 接口工具函数 / 中间件 / 租户隔离 / 后台门禁 / 商家主链路 / **翻译并发编排**）+ `gofmt` / `go vet` / `tsc --noEmit` + 导出面中文文档注释门禁（`tools/check_doc_comments.py`，棘轮：新导出符号不补注释就红）。覆盖率 **总 40.3% / httpapi 39.0%**（原目标 35% / 30%，已达成） |
 | `make smoke` | 77 | 后端 `:8080` | 端到端 28 步：健康检查 → 语种注册表 → 认证 → 建店（自动配券+双码）→ 保存确认稿 → **未确认拒绝翻译** → 确认 → **一次 5 语种多语化** → 译文落库 → **分类名多语化** → **注册前多语预览** → 公开门店页 → 评价领券（含**券面本地化**）→ **评分契约** → 核销 → 重复核销拒绝 → **跨店核销拒绝** → 经营洞察 → 双码 PNG 魔数 → **客人端 AI 点菜助手（RAG 检索）** → **服务请求全链路**（客人发起 / 商家待办 / 标记完成 / 待办下降）→ **AI 凭据 RBAC 守卫** → **翻译 Key RBAC 守卫**（超管专属，普通商家连列表都 403）→ **菜品图片**（上传 / 公开访问 PNG 魔数 / 删除 404） |
 | `make smoke-offline` | 32 | 另起 `:8099`（`make api-offline`） | 把翻译链指向不可达地址 → 确定性验证**内置词典兜底**与「**绝不编造**」纪律（未收录词必须留空、词典只覆盖中→英、其它语种不得回填原文）；并回归**健康检查诚实口径**（黑洞地址必须报 `translate_reachable=false` / `translate_mode=dict-stub`，而不是谎报 live） |
-| `make render-check` | 74+1 | 后端 + 前端 dev server | **真开无头浏览器**，用 CDP 断言客人端渲染纪律 L1–L6、语言选择器 10 项、切语言同步 `<html lang>`、缺译文标注，并回归「评价弹层一打开整页崩」的 React 保留属性 P0 事故；含**零译文店夹具**（确认即有菜单、未翻译如实标注而非谎称机器翻译）、**AI 助手面板**交互、**商家端未翻译提醒横幅**（零译文弹出、补翻后消失），以及**平台管理五个分区逐一点开并渲染**（FIX-13 拆分的回归网：tsc 只证明类型对、vite build 只证明模块解析对，都不证明点进去真的渲染出来了）。「+1」为机翻质量条件断言（回复是否提及菜单菜品），按设计可跳过 |
-| `bash scripts/smoke_admin.sh` | 23 | 后端（脚本默认 `:8081`，可用 `BASE=` 覆盖）+ 开发库 psql | 超管正例：psql 提权 → 租户 CRUD、账号管理、翻译 Key（超管专属：脱敏+启停）、AI 凭据（can_write）、经理 vs 超管权限对照 403、审计留痕。**只跑开发库**（提权是危险操作，脚本刻意不自动化） |
+| `make render-check` | 92 | 后端 + 前端 dev server | **真开无头浏览器**，用 CDP 断言客人端渲染纪律 L1–L6、语言选择器 10 项、切语言同步 `<html lang>`、缺译文标注，并回归「评价弹层一打开整页崩」的 React 保留属性 P0 事故；含**零译文店夹具**（确认即有菜单、未翻译如实标注而非谎称机器翻译）、**AI 助手面板**交互、**商家端未翻译提醒横幅**（零译文弹出、补翻后消失），以及**平台管理五个分区逐一点开并渲染**（FIX-13 拆分的回归网：tsc 只证明类型对、vite build 只证明模块解析对，都不证明点进去真的渲染出来了）。其中 1 条机翻质量条件断言按设计可跳过，未跳过时已计入 92 |
+| `bash server/scripts/smoke_admin.sh` | 24 | 后端（脚本默认 `:8080`，可用 `BASE=` 覆盖）+ 开发库 psql | 超管正例：psql 提权 → 租户 CRUD、账号管理、翻译 Key（超管专属：脱敏+启停）、AI 凭据（can_write）、经理 vs 超管权限对照 403、审计留痕。**只跑开发库**（提权是危险操作，脚本刻意不自动化） |
 
 ```bash
 # 典型用法
@@ -131,6 +139,24 @@ bash tools/indep_byte_uat.sh               # 独立字节级 UAT（75 条，另�
 多租户隔离（一次性租户 → 本租户可见 → 他租户不可见 → 超管边界 → 回收断言残留 0）、租户外键三档语义（0007）。
 它**自带环境自证**（第 0 段）并**自行 psql 提权**——跑它不需要先跑过别的脚本。
 
+### 小程序端类型检查
+
+```bash
+cd miniapp && npm install && npm run typecheck   # = tsc --noEmit，当前 0 错误
+```
+
+它**不在 `make test` 里**（`make test` 只跑 `web/` 的 `tsc`）：小程序端的依赖树是另一套，
+CI 上要单独装一次，`make test` 的定位是「不依赖任何服务、可安全放进 CI」，塞进去会拖慢主链。
+
+★ **装依赖被中断时，`node_modules` 会留下「半安装的包」**（2026-10-22 实测）：
+目录在、文件不全，连 `package.json` 都可能没有。此时 `tsc` 报的是
+`TS2307: Cannot find module '@tarojs/components' or its corresponding type declarations`——
+看着像代码缺引用，**实际是依赖树被砍了一半**。本次有 7 个包中招（`@tarojs/components`
+1438 → 93 个文件、`@tarojs/runtime` 171 → 43、`swiper` 319 → 99、`less` 128 → 1 …）。
+判别方法不是「重装一遍试试」，而是**跟一份完整树按包比文件数**，只补真正残缺的那几个。
+另外 `.bin` 软链缺失时 `npx tsc` 也会失败，可直接调
+`node node_modules/typescript/lib/tsc.js --noEmit -p tsconfig.json`。
+
 写测试脚本时踩过的坑（都已写进脚本注释）：
 
 - **清缓存是离线测试的前提**。TM 缓存会命中上一次在线跑出来的译文，把离线兜底整条路径「盖住」，测试假绿。
@@ -139,6 +165,14 @@ bash tools/indep_byte_uat.sh               # 独立字节级 UAT（75 条，另�
 - **`dish` 行在确认草稿时就落库**（2026-10-19 Q1 修订：确认与翻译共用同一装配，确认即有菜单）。未翻译只是 `names` 各语种为空，客人端展示原文并挂「未翻译」标、提示语如实说「尚未翻译」——测「缺译文」态直接建一家不翻译的店即可。
 - **独立脚本不要依赖别的脚本的副作用**（2026-10-20 修）：`indep_byte_uat.sh` 的 E 段原先假定「超管已存在」（由 `smoke_admin.sh` 提权）。清空业务数据后直接跑，四条断言一起变红——**看着像多租户回归，实际只是没有超管**（登录接口首次登录会建号，默认 `manager`，于是 `admin/*` 一律 403）。环境缺口伪装成功能回归，比漏测更消耗信任，所以脚本改为自行提权并自证角色已生效。
 - **断言跨行指令要先折叠换行**（2026-10-20 修）：`gzip_types` 这类 nginx 指令后面跟着三行类型，单行 `grep` 必然漏；断言写法不对导致的假红，比缺功能更难查。
+- **跑之前先确认端口上是自己人**（2026-10-22 修）：本机 `:5173` 上跑的是**别的项目的 vite**——
+  本项目的 dev server 随会话重启死了，端口被别人占了。于是 UAT 走代理探到的 `/api/health` 是别家的
+  （返回 401），报出来是「健康检查坏了」。真实原因是**连错了进程**。
+  断言前先核一下端口上那个进程的 cwd，比对着红字排障便宜得多。
+- **测试文件里的导出符号也在注释门禁范围内**（2026-10-22）：`tools/check_doc_comments.py` 扫的是整个
+  `server/` 与 `web/src`、`miniapp/src`，**包含 `*_test.go`**。新建测试桩（实现接口的假引擎）时，
+  它的方法名也是导出符号，一样要补中文注释——否则 `make test` 红。
+  正确做法是**补注释**，不是 `--update-baseline` 抬基线（那等于把欠账记为标准）。
 
 ---
 
@@ -211,6 +245,7 @@ langcross-merchant-app/
 │   │   ├── crypt/                # 凭据 AES-256-GCM 加密（LC_SECRET 派生）
 │   │   ├── idgen/                # 随机 ID 与券码
 │   │   └── httpapi/              # 路由 / 鉴权 / 处理器（含 handlers_assist* / handlers_guest_assist）
+│   │       └── translate_parallel.go  # 多语种翻译的并发编排与整体截止时间（FIX-14）
 │   ├── migrations/               # SQL 迁移（embed 进二进制，按序号执行）
 │   │   ├── 0001_init.sql         # 11 张业务表（不含 schema_migrations）
 │   │   ├── 0002_i18n.sql         # dish.names_json + translation_cache
@@ -230,20 +265,41 @@ langcross-merchant-app/
 │   │   └── guest-render-check.mjs# 客人端渲染回归（无头浏览器 + CDP）
 │   └── src/
 │       ├── api/client.ts         # API 客户端与类型（含 assist / 服务请求 / AI 凭据 / 平台管理）
-│       ├── guest/StorePage.tsx   # 客人端门店页（多语优先）+ 菜品图片 + 评价领券 + 券卡
-│       ├── guest/GuestAssistant.tsx # 客人端 AI 点菜助手抽屉（语音 + 文本 + 动作按钮）
-│       ├── guest/i18n.ts         # 客人端 10 语种词典 + 问店员短语
-│       ├── admin/AdminApp.tsx    # 商家端：概览/菜单(语种覆盖+图片)/券核销/洞察/服务请求/平台管理/AI凭据/设置
-│       ├── admin/PlatformTab.tsx # 平台管理外壳（按角色决定能看到哪些分区 + 二级 Tab 切换）
-│       ├── admin/platformHelpers.tsx # 平台管理各分区共用小工具（角色标签 / 相对时间 / 状态徽标）
-│       ├── admin/PlatformOverview.tsx    # 分区：平台概览（超管，四个总数）
-│       ├── admin/PlatformTenants.tsx     # 分区：租户增删改 + 展开看门店
-│       ├── admin/PlatformAccounts.tsx    # 分区：账号与角色（超管 / 租户管理员共用）
-│       ├── admin/PlatformTranslateKeys.tsx # 分区：翻译 Key（★ 超管专属，含试译 / 轮换 / 明文）
-│       ├── admin/PlatformAudit.tsx       # 分区：审计留痕
-│       ├── admin/RequestsTab.tsx # 服务请求处理台（轮询 + 完成/取消）
-│       ├── admin/AICredentialsTab.tsx # 平台 AI 凭据管理（超管；tenant_admin 只读）
-│       ├── admin/Onboarding.tsx  # 引导流 P1–P5（P4 支持多语种预览）
+│       ├── guest/
+│       │   ├── StorePage.tsx     # 客人端门店页（280 行）：只留数据状态机与装配
+│       │   ├── storeShared.tsx   # 客人端共用：语种探测 / dishTitle / SectionHead
+│       │   ├── StoreHero.tsx     # 门店头图与店名
+│       │   ├── StoreSignature.tsx# 招牌菜区块
+│       │   ├── StoreMenu.tsx     # 菜单列表（分类 + 菜品卡 + 图片占位）
+│       │   ├── StoreLangSheet.tsx# 语言选择弹层（10 语种）
+│       │   ├── StoreRateSheet.tsx# 评价弹层（三维度评分）+ 领券
+│       │   ├── StoreCouponSheet.tsx # 券卡展示
+│       │   ├── StoreHelpSheet.tsx# 问店员 / 服务请求弹层
+│       │   ├── GuestAssistant.tsx # 客人端 AI 点菜助手抽屉（语音 + 文本 + 动作按钮）
+│       │   └── i18n.ts           # 客人端 10 语种词典 + 问店员短语
+│       ├── admin/
+│       │   ├── AdminApp.tsx      # 商家端根组件（64 行）：只做 authed ? 控制台 : 登录
+│       │   ├── adminShared.ts    # 商家端共用：Tab 类型与清单
+│       │   ├── AdminLogin.tsx    # 登录页
+│       │   ├── AdminConsole.tsx  # 控制台外壳：左侧导航 + 顶栏
+│       │   ├── AdminOverview.tsx # Tab：概览
+│       │   ├── AdminMenuTab.tsx  # Tab：菜单（语种覆盖 + 菜品图片）
+│       │   ├── AdminCouponTab.tsx# Tab：券核销
+│       │   ├── AdminInsightsTab.tsx # Tab：经营洞察
+│       │   ├── AdminSettingsTab.tsx  # Tab：设置
+│       │   ├── RequestsTab.tsx   # Tab：服务请求处理台（轮询 + 完成/取消）
+│       │   ├── AICredentialsTab.tsx  # Tab：AI 凭据（超管；tenant_admin 只读）
+│       │   ├── PlatformTab.tsx   # Tab：平台管理外壳（按角色过滤分区 + 二级 Tab）
+│       │   ├── platformHelpers.tsx    # 平台管理共用的小工具
+│       │   ├── PlatformOverview.tsx   # 分区：平台概览（超管）
+│       │   ├── PlatformTenants.tsx    # 分区：租户增删改 + 展开看门店
+│       │   ├── PlatformAccounts.tsx   # 分区：账号与角色
+│       │   ├── PlatformTranslateKeys.tsx # 分区：翻译 Key（★ 超管专属）
+│       │   ├── PlatformAudit.tsx      # 分区：审计留痕
+│       │   ├── Onboarding.tsx    # 引导流外壳（110 行）：分步状态机
+│       │   ├── onboardingShared.ts    # 引导流各步共用的类型与小工具
+│       │   ├── OnboardingStep1~5.tsx  # 引导流 P1–P5（P4 支持多语种预览）
+│       │   └── QrImage.tsx       # 二维码取图（cleanup 里回收 ObjectURL）
 │       └── styles/global.css     # 设计令牌 + 客人端/商家端样式
 ├── miniapp/                      # Taro 小程序端（骨架，S4 迁移中）
 │   ├── config/                   # Taro 编译配置（dev / prod）
@@ -292,6 +348,21 @@ langcross-merchant-app/
 22. **压缩 / TLS / 限流归网关**（2026-10-20 FIX-12）：应用层保持零依赖，这些横切关注点交给 nginx（`deploy/nginx.conf`）。**API 直连不带 `Content-Encoding` 是设计如此**，别顺手在 Go 里加个 gzip 中间件——那样压缩逻辑会分裂到两处，网关再压一遍就是双重压缩，而且没人会发现。同理，SPA 深链回落必须配在网关，否则桌码扫出来 404。
 23. **归属口径写进 SQL，不写进 Go 的 if**（2026-10-20 FIX-8/10）：`WHERE id=$1 AND (tenant_id=$2 OR tenant_id='' OR $2='')`——平台级凭据与超管的 `tenant_id` 都是空串，朴素的 `tenant_id=$2` 会把超管挡在自己维护的凭据门外；列表的作用域同理必须落在 `WHERE` 里，不能「取全表回来再筛」。写测试时**断言 SQL 文本**而不是只断言响应，否则后一种实现照样能绿。
 24. **公开端点的成本护栏按「花钱的那个主体」计**（2026-10-20 FIX-7）：客人助手不登录，IP 限流挡不住分布式脚本，所以日限按**门店**计（`reserveGuestLLM`，默认 1000/店/天，0=不限，按 UTC 归零）。超限**收回 LLM 配置但客人照常得到回答**——护栏的目的是「不再花钱」，不是「让客人干等」。计数口径是「尝试了一次模型模式」，失败也计：请求已发出、钱已花，按结果计数会让失败重试变成免费通道。
+25. **批量外部调用要并发 + 有总截止时间**（2026-10-22 FIX-14）：凡是「按语种 / 按条目循环打外部接口」的地方，
+    默认就是错的——串行把 N 次往返叠加成 N×RT，用户看到的是卡死。改成**限量并发**（并发上限按对方限流定，
+    不是按我们 CPU 定）并挂一个**整体 deadline**（必须小于上游网关的 timeout，让我们先超时给出可读错误，
+    而不是被网关砍成 504）。并发收集结果时**每 goroutine 收自己那份、Wait 之后合并**——
+    Go 的 map 并发写是 fatal error，不是概率性 race。
+26. **断言要等条件，不要立刻判定**（2026-10-22）：按钮 disabled、弹层异步取图、接口轮询刷新，
+    这些「过一会儿才成立」的状态，用固定 `sleep` 或直接断言都会飘——
+    前者慢且不稳，后者会在慢机器上假红。统一写 `waitEnabled` / `waitFor` 这类**轮询等待**再断言。
+    找元素也别靠下标（第 N 个 input 不一定是你要的那个），按 `placeholder` 等稳定特征定位，
+    并对「多个匹配」报错而不是默默点第一个。
+27. **拆分大文件前先看安全网是不是空的**（2026-10-22 FIX-13 收尾）：四个 god component 拆完才确认
+    render-check 原先**完全不覆盖平台管理**，也就是说唯一的安全网对正在拆的组件是空的。
+    先补「五个分区逐一点开并真的渲染出来」这一步，再动手拆——`tsc` 只证明类型对、
+    `vite build` 只证明模块解析对，都不证明点进去渲染得出来。
+    拆分本身用**归一化比对**（去掉注释 / `export` / import 后与原文件对应段逐字节比）自证零语义漂移。
 
 ---
 

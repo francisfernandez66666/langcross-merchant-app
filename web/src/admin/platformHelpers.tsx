@@ -11,6 +11,7 @@
  * 每个分区独立成一个文件。
  */
 
+/** 五级角色的中文名，用于账号列表与角色标签；命中不到按原值回显，避免新增角色后直接显示空白。 */
 export const ROLE_LABEL: Record<string, string> = {
   super_admin: '超管',
   tenant_admin: '租户管理员',

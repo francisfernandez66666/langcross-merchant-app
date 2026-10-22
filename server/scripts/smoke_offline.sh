@@ -19,7 +19,7 @@
 #   不清的话，上一次在线跑出来的缓存会命中，把离线兜底整条路径「盖住」，
 #   测试会假绿。这是本脚本最容易踩的坑。
 #
-# 用法：BASE=http://localhost:8099 bash scripts/smoke_offline.sh
+# 用法（仓库根目录）：BASE=http://localhost:8099 bash server/scripts/smoke_offline.sh
 # 退出码：0 = 全部通过；1 = 存在失败断言或前置不满足
 # ─────────────────────────────────────────────────────────────
 set -uo pipefail
@@ -165,6 +165,6 @@ psql "$DB" -v ON_ERROR_STOP=1 -q -X -c "DELETE FROM translation_cache;" >/dev/nu
 
 # ─────────────────────────────────────────────────────────────
 printf '\n\033[1m═══ 离线兜底结果：%d 通过 / %d 失败 ═══\033[0m\n' "$PASS" "$FAIL"
-echo "清理本次测试数据：bash scripts/reset_test_data.sh"
+echo "清理本次测试数据：bash server/scripts/reset_test_data.sh"
 
 [ "$FAIL" -eq 0 ] || exit 1

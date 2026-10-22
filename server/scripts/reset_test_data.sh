@@ -30,10 +30,10 @@
 #   默认租户 langcross 名下，删不掉租户，只能按名字认，与凭据同模式）。
 #
 # 用法：
-#   bash scripts/reset_test_data.sh                 # 清理测试数据（保留 TM 缓存）
-#   bash scripts/reset_test_data.sh --purge-cache   # 同时清空翻译记忆
-#   bash scripts/reset_test_data.sh --all           # 清空全部业务数据（保留表结构与迁移记录）
-#   bash scripts/reset_test_data.sh --dry-run       # 只打印将要删除的条数，不实际删
+#   bash server/scripts/reset_test_data.sh                 # 清理测试数据（保留 TM 缓存）
+#   bash server/scripts/reset_test_data.sh --purge-cache   # 同时清空翻译记忆
+#   bash server/scripts/reset_test_data.sh --all           # 清空全部业务数据（保留表结构与迁移记录）
+#   bash server/scripts/reset_test_data.sh --dry-run       # 只打印将要删除的条数，不实际删
 #
 # 环境变量：
 #   LC_DATABASE_URL      PostgreSQL DSN（默认 postgres://localhost:5432/langcross?sslmode=disable）
@@ -287,5 +287,5 @@ done
 
 echo
 echo "✓ 测试数据已清理。"
-echo "  重新播种演示店：bash scripts/seed_demo.sh"
-echo "  重新跑冒烟测试：bash scripts/smoke.sh"
+echo "  重新播种演示店：bash server/scripts/seed_demo.sh"
+echo "  重新跑冒烟测试：bash server/scripts/smoke.sh"

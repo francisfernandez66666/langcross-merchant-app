@@ -61,7 +61,7 @@
 | GET | `/api/stores/{id}/draft` | 最新原文确认稿 |
 | POST | `/api/stores/{id}/draft` | 保存确认稿 `{lang, items:[{name,price,category,selected}]}` |
 | POST | `/api/stores/{id}/draft/confirm` | 确认原文；★ **未确认不允许翻译**（否则 `VALIDATION`）；★ 确认即把菜品落库（2026-10-19 Q1 修订：确认与翻译共用同一装配，确认即有菜单），未翻译的语种在 `names` 里不出现 key |
-| POST | `/api/stores/{id}/translate` | 多语化：`{targets:["en","ja",...]}` → 只翻 `selected` 的菜，结果写 `dish.names_json`；**同批顺带把分类名多语化**写 `store.category_names`。返回 `{dishes, translated_count, targets, categories, engine}` |
+| POST | `/api/stores/{id}/translate` | 多语化：`{targets:["en","ja",...]}` → 只翻 `selected` 的菜，结果写 `dish.names_json`；**同批顺带把分类名多语化**写 `store.category_names`。返回 `{dishes, translated_count, targets, categories, engine}`。★ 语种之间**并发**（上限 3）执行，整批挂 **45s 总截止时间**（`translate_parallel.go`） |
 | GET | `/api/stores/{id}/dishes` | 菜单（每道菜含 `name_zh` + `names`） |
 | PATCH | `/api/stores/{id}/dishes/{dishId}` | 更新售罄 / 每日剩余 |
 | POST | `/api/stores/{id}/dishes/{dishId}/image` | 上传 / 替换菜品图片（multipart 字段 `image`，≤5MB，PNG/JPEG/WebP/GIF）；返回 `{image_url}`，旧图自动删除 |
@@ -93,7 +93,7 @@
 | GET | `/api/public/store/{slug}?ref=` | 门店页数据。返回 `{store, dishes}`；门店含 `category_names`、菜品含 `names`；★ **未填 WiFi 时 `wifi_ssid` 字段不出现**（前端据此条件渲染）。顺带记 `g_scan` |
 | POST | `/api/public/store/{slug}/rating` | 提交三维度评价 `{ref, score_dish, score_service, score_return, comment, lang}`。★ **评价即领券**。返回 `{rating, coupon, coupon_gift}`，其中 `coupon_gift` 是**按客人语言本地化后的券面文案** |
 | GET | `/api/public/coupon/{code}` | 按券码查券 |
-| POST | `/api/public/translate-preview` | P4 注册前多语预览（不落库、不需登录）。入参 `{from, targets[], items[]}`；返回 `{items, categories, source_cats, targets, engine}`，`items[].names` 为译文 |
+| POST | `/api/public/translate-preview` | P4 注册前多语预览（不落库、不需登录）。入参 `{from, targets[], items[]}`；返回 `{items, categories, source_cats, targets, engine}`，`items[].names` 为译文。★ 同样走**并发 + 45s 截止时间**；P4「下一步」按钮要等本接口返回才解禁，所以它的耗时直接决定商家看到的「卡不卡」 |
 
 ### 评分契约（有意的不对称）
 
@@ -192,7 +192,7 @@ LLM 凭据由平台超管统一维护、密文落库（`LC_SECRET` 派生的 AES
 |---|---|---|
 | GET | `/api/admin/audit` | 最近 200 条审计（超管全量；租户管理员后端按租户过滤）。动作含建租户、改角色、维护 Key、查看明文等 |
 
-超管端到端验证：`bash server/scripts/smoke_admin.sh`（需 psql 提权，见脚本头注释；脚本默认 BASE 指向 `:8081`，打 `:8080` 时用 `BASE=http://localhost:8080` 覆盖）。
+超管端到端验证：`bash server/scripts/smoke_admin.sh`（需 psql 提权，见脚本头注释；脚本默认 BASE 指向 `:8080`，与 `make api` 一致，可用 `BASE=` 覆盖；开头有 `/api/health` 前置检查，连不上会一句话说清楚再退出）。
 
 ## 工具
 
@@ -211,9 +211,10 @@ LLM 凭据由平台超管统一维护、密文落库（`LC_SECRET` 派生的 AES
 | 脚本 | 覆盖 |
 |---|---|
 | `server/scripts/smoke.sh` | 28 步、77 条断言。含语种注册表、一次 5 语种翻译、分类名多语化、注册前多语预览、券面本地化、评分契约、跨店核销拒绝、双码 PNG 魔数、客人端 AI 点菜助手（RAG 检索）、服务请求全链路（发起/待办/标记完成）、AI 凭据 RBAC 守卫、翻译 Key RBAC 守卫（普通商家连列表都 403）、菜品图片（上传/公开访问 PNG 魔数/删除 404）、**Q1 确认即落库 + 商户未翻译提醒** |
-| `server/scripts/smoke_admin.sh` | 23 条断言。超管正例：psql 提权 → 租户 CRUD、账号管理、翻译 Key（超管专属，脱敏+启停）、AI 凭据（can_write）、经理 vs 超管权限对照 403、审计留痕 |
+| `server/scripts/smoke_admin.sh` | 24 条断言。超管正例：psql 提权 → 租户 CRUD、账号管理、翻译 Key（超管专属，脱敏+启停）、AI 凭据（can_write）、经理 vs 超管权限对照 403、审计留痕 |
 | `server/scripts/smoke_offline.sh` | 32 条断言。翻译链指向不可达地址 → 确定性验证内置词典兜底与「绝不编造」纪律；并回归健康检查诚实口径（黑洞地址必须报 `translate_reachable=false` / `translate_mode=dict-stub`） |
-| `web/scripts/guest-render-check.mjs` | 74 条稳定断言 + 1 条机翻质量条件断言（按设计可跳过）。真开无头浏览器，验证客人端渲染纪律与语言切换、零译文店夹具、AI 助手面板交互、商家端未翻译提醒横幅，以及**平台管理五个分区逐一点开并渲染**（FIX-13 拆分的回归网——纯搬运拆分编译过不代表渲染得出来） |
+| `web/scripts/guest-render-check.mjs` | 92 条断言（含 1 条机翻质量条件断言，按设计可跳过）。真开无头浏览器，验证客人端渲染纪律与语言切换、零译文店夹具、AI 助手面板交互、商家端未翻译提醒横幅，以及**平台管理五个分区逐一点开并渲染**（FIX-13 拆分的回归网——纯搬运拆分编译过不代表渲染得出来） |
 | `tools/indep_byte_uat.sh` | 75 条断言，**全绿**。独立字节级 UAT，不复用上面任何脚本；含 0007 租户外键三档语义的 G1–G10。B6（压缩）已按「压缩归网关」结案并拆成两条：B6a 反向断言应用层**确实不**压缩（防止压缩逻辑分裂到两处），B6b 断言 `deploy/nginx.conf` 真开了 gzip 且覆盖 `application/json`、有 SPA fallback 与 `/api` 反代。脚本**自带环境自证并自行提权**，不依赖先跑过别的脚本 |
 | `tools/check_doc_comments.py` | 导出面中文文档注释门禁（棘轮）：新增导出符号不补注释就 exit 1；`make doc-comments` 或 `make test` 会跑 |
-| `go test ./...`（单测） | Go 单测：助手引擎、守卫链、凭据加解密、配置、翻译链与租户 Key、**withAuth / requireRole / effectiveTenant / withRecover 中间件**、**租户隔离（他租户 403、列表作用域必须进 SQL WHERE、超管跨租户 403 是设计）**、**后台门禁（整条 admin 路由面逐条过角色门禁 + 防提权 + superKeyAdmin 四态）**、**商家主链路（未确认不许翻译、建店归属走 effectiveTenant、重新确认继承售罄/译文、枚举白名单）**、**AI 凭据归属口径（记录型假 SQL 驱动断言 WHERE）**、**客人助手 LLM 接线（mock LLM server）**、**CanAccessStore 五级角色矩阵**。当前覆盖率：总 **39.1%**、httpapi **36.2%**（原目标 35% / 30%，已达标） |
+| `go test ./...`（单测） | Go 单测：助手引擎、守卫链、凭据加解密、配置、翻译链与租户 Key、**withAuth / requireRole / effectiveTenant / withRecover 中间件**、**租户隔离（他租户 403、列表作用域必须进 SQL WHERE、超管跨租户 403 是设计）**、**后台门禁（整条 admin 路由面逐条过角色门禁 + 防提权 + superKeyAdmin 四态）**、**商家主链路（未确认不许翻译、建店归属走 effectiveTenant、重新确认继承售罄/译文、枚举白名单）**、**AI 凭据归属口径（记录型假 SQL 驱动断言 WHERE）**、**客人助手 LLM 接线（mock LLM server）**、**CanAccessStore 五级角色矩阵**、**翻译并发编排（语种间真的并发、并发被限幅、比串行快、不串味、截止时间短于网关 timeout、截止时间真的传到引擎、译文落到正确的条目上）**。当前覆盖率：总 **40.3%**、httpapi **39.0%**（原目标 35% / 30%，已达标） |
+| `tools/check_doc_comments.py`（已含在上行） | 注意：**扫描范围包含 `*_test.go`**。新建测试桩（实现接口的假引擎）时它的方法名也是导出符号，一样要补中文注释，否则 `make test` 会红 |

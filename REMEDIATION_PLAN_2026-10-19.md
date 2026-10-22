@@ -283,7 +283,8 @@ func (s *Server) guestLLMConfig(ctx context.Context, tenantID string) assist.LLM
 
 ### 剩余（下批次）
 
-FIX-10 覆盖率补层（httpapi 2.9% → 30%）、FIX-12 部署产物（nginx，`gzip on` 让 indep UAT 唯一失败项 B6 转绿）、FIX-13 god component 拆分。miniapp `npm run typecheck` 始终未跑成（沙箱网络限制）。
+FIX-10 覆盖率补层（httpapi 2.9% → 30%）、FIX-12 部署产物（nginx，`gzip on` 让 indep UAT 唯一失败项 B6 转绿）、FIX-13 god component 拆分。miniapp `npm run typecheck` 当时始终未跑成（沙箱挡了 `npm install` 的 `.bin` 软链阶段）
+→ **已于 2026-10-22 跑通并归零，见 §10.3。**
 
 ---
 
@@ -346,8 +347,9 @@ FIX-10 覆盖率补层（httpapi 2.9% → 30%）、FIX-12 部署产物（nginx�
 就是随使用时长线性增长的内存泄漏，低配收银平板上很明显。已抽出 `web/src/admin/QrImage.tsx`
 （cleanup 里回收，且 URL 变化时旧地址也回收），两处改为引用。
 
-**四组件拆分（AdminApp 911 / PlatformTab 860 / StorePage 710 / Onboarding 676 行）未做**：
-纯技术债，唯一的安全网是 render-check（62 条），收益是可维护性、风险是回归。按原计划「可排期」保留。
+**四组件拆分（AdminApp 911 / PlatformTab 860 / StorePage 710 / Onboarding 676 行）当时未做**：
+纯技术债，唯一的安全网是 render-check（当时 62 条），收益是可维护性、风险是回归，按原计划「可排期」保留。
+→ **已于 2026-10-22 全部拆完，见 §10。**
 
 #### 第三轮：PlatformTab 拆完，并给拆分补上回归网（2026-10-21）
 
@@ -381,11 +383,14 @@ FIX-10 覆盖率补层（httpapi 2.9% → 30%）、FIX-12 部署产物（nginx�
 
 ### 回归结果（全绿）
 
+> 下表是**第二轮结束时**（2026-10-20 深夜 / 2026-10-21）的快照，后面的数字已被 §10 刷新；
+> 保留它是为了让每一轮的起点可追溯，读当前状态请直接看 §10。
+
 | 套件 | 结果 |
 |---|---|
 | `go test ./...` | 全绿；`gofmt -l` 空、`go vet` 干净、`tsc --noEmit` 干净 |
 | `smoke.sh` / `smoke_admin.sh` / `smoke_offline.sh` | 77 / 0、23 / 0、32 / 0 |
-| `guest-render-check.mjs` | 62 / 0 |
+| `guest-render-check.mjs` | 75 / 0（本轮 62 → 75） |
 | `tools/indep_byte_uat.sh` | **75 / 0（首次全绿）** |
 | `check_doc_comments.py` | 0 / 0 |
 
@@ -395,6 +400,150 @@ README：新增「部署」章节（拓扑图 + 三步命令 + 「为什么压�
 目录结构补 `deploy/`、独立 UAT 计数 68→75、新增纪律 22–24（压缩归网关 / 归属口径写进 SQL / 
 公开端点成本按花钱主体计）、「写测试脚本踩过的坑」补两条（脚本别依赖别的脚本的副作用；跨行指令先折叠换行）。
 API.md：测试覆盖表刷新并新增单测一行（含覆盖率与目标缺口）、客人助手补「凭据按门店租户解析 + 两级限流 + 超日限回落规则模式」。
+
+---
+
+## 10. 收尾第三轮（2026-10-22）：FIX-13 全拆完 / FIX-14 / miniapp 类型检查归零
+
+### 10.1 FIX-13 收尾：四个 god component 全部拆完
+
+| 组件 | 拆分前 | 现在 | 拆出 |
+|---|---|---|---|
+| `admin/PlatformTab.tsx` | 860 | 102 | 5 个分区 + `platformHelpers`（§9 第三轮已拆） |
+| `admin/Onboarding.tsx` | 661 | 110 | `OnboardingStep1~5` + `onboardingShared`（6 个新文件） |
+| `guest/StorePage.tsx` | 719 | 280 | `StoreHero` / `StoreSignature` / `StoreMenu` / `StoreLangSheet` / `StoreRateSheet` / `StoreCouponSheet` / `StoreHelpSheet` + `storeShared`（8 个新文件） |
+| `admin/AdminApp.tsx` | 910 | 64 | `AdminLogin` / `AdminConsole` / `AdminOverview` / `AdminMenuTab` / `AdminCouponTab` / `AdminInsightsTab` / `AdminSettingsTab` + `adminShared`（8 个新文件） |
+
+拆完的判据是「**根组件只留状态机与装配**」：`AdminApp` 现在就是 `authed ? <Console/> : <Login/>`。
+共用面统一落在 `xxxShared` 里，不搞「从一个大文件里剪出来」的悬空引用。
+
+**零语义漂移自证**：同 §9 的做法——去掉文档注释 / `export` / import 后与原文件对应段归一化逐字节比对。
+每次拆完都过一遍，因为「纯搬运」和「顺手改了一点」在 diff 上长得几乎一样，只有归一化比对能分开。
+
+**拆分顺序是刻意排的**：PlatformTab（纯展示、无跨分区共享状态）→ Onboarding（有分步状态机，但步间只传 formData）
+→ StorePage（客人端，安全网是 render-check 的 L1–L6）→ AdminApp（商家端根组件，牵动所有 Tab，风险最高）。
+风险高的放最后，是因为拆到那时安全网已经补厚了。
+
+#### 拆分过程踩到的坑（都已写进 README 纪律 26 / 27）
+
+- **先确认安全网不是空的**：拆之前查出来 render-check **完全不覆盖平台管理**——
+  也就是说 FIX-13 唯一的安全网对正要拆的组件是空的。§9 补的第 9 步（五个分区逐一点开并断言真的渲染出来）
+  才是这次敢动手的前提。`tsc` 只证明类型对，`vite build` 只证明模块解析对，**都不证明点进去渲染得出来**。
+- **`return ( {jsx} )` 会被当成对象字面量**：`StoreHero` / `StoreSignature` 拆出来后直接崩。
+  要么包 Fragment `<>...</>`，要么去掉那层多余括号。
+- **未使用的 import 在本仓是编译错误**（`noUnusedLocals` / `noUnusedParameters`）：
+  不能 blanket import 一堆再用一部分，必须**逐文件按实际用到的符号推导 import 清单**。
+  拆 `storeShared` 时就因为多留了 `langLabel` / `t` 红过一次。
+- **注释不能落在 `return` 的 JSX 里**：`StoreSignature` 的 `/* 招牌… */` 放进 return 后成了第二个根节点。
+- **别为了好看顺手改名**：`StorePage` 里保留 `const title = (d: Dish) => dishTitle(d, lang)` 这个转发，
+  否则要动上百处调用点——那次改动量就会大到「拆」和「改」混在一起，没法再用归一化比对自证。
+
+### 10.2 FIX-14：多语种翻译并发编排（真实性能缺陷，不是技术债）
+
+**症状**：P4「下一步」按钮要等预览接口返回才解禁，商家点下去后页面看着像卡死。
+
+**根因**：翻译是「**每语种、每批一次外部 HTTP 调用**」，而三个调用点
+（`handlePreviewTranslate` / `translateCategories` / `handleTranslate`）都**串行遍历语种**。
+11 道菜 × 3 语种 + 5 个分类 = 48 次串行往返，冷缓存下 20~30 秒。
+
+**改法**：抽 `translate_parallel.go`——语种间**限量并发** + 整批挂**一个总截止时间**。
+
+| 常量 | 值 | 为什么是这个值 |
+|---|---|---|
+| `translateTargetConcurrency` | **3** | 公开翻译引擎按 **IP** 限流。并发拉满会吃 429，然后**一个词都翻不出来**——比慢更糟。上限按对方限流定，不按我们 CPU 定 |
+| `translateOverallDeadline` | **45s** | 必须**小于**网关 `proxy_read_timeout 60s`。宁可我们自己先超时给出可读错误，也不要被网关砍成 504（客人看到的是「网络错误」，运维看到的是网关日志，两边都查不出是翻译慢） |
+
+**并发收集结果时每 goroutine 收自己那份、Wait 之后合并**。
+Go 的 map 并发写是 **fatal error** 不是概率性 race，`-race` 也未必每次抓到——
+写成「共享 map + 加锁往里塞」能过测试，`-race` 下也常常是绿的，但生产上会整个进程崩掉。
+`handleTranslate`（商家正式翻译）不能复用 `translateAllTargets`：它每个语种的文本集不同（已有译文的跳过），
+所以那里是 `forEachTargetParallel` + 各自收集 `perIdx` / `perLang` 再合并。
+
+**实测**：冷缓存 20~30s → **9.7s**；热缓存 **1.5ms**。与页面「约十几秒」的提示对齐了。
+
+**9 条单测锁的不变量**（`translate_parallel_test.go`）：
+
+| 用例 | 锁什么 |
+|---|---|
+| `RunsInParallel` | 用「凑够 N 个并发才放行」的闸门 + 看门狗：串行实现会一直卡住 |
+| `ConcurrencyIsBounded` | 并发真的被限在 3，不是「起了 N 个 goroutine 但看起来像是并发」 |
+| `ActuallyFasterThanSerial` | 墙钟时间：15 语种 × 30ms 串行 ≈ 450ms，并发应显著更快 |
+| `NoCrossWiring` | en 的位置不许出现 ja 的译文（桩件译文固定 `<语种>:<原文>`，一眼可辨） |
+| `EmptyTexts` | 空输入不炸 |
+| `WithTranslateDeadline_ShortEnoughForGateway` | **45s < 60s** 这条关系被写死成断言——有人把网关调小或把 deadline 调大就会红 |
+| `PreviewTranslate_PassesDeadlineToEngine` | 截止时间真的传到了引擎那一层，不只是加在编排层 |
+| `PreviewTranslate_LandsOnRightItems` | 译文落到**正确的条目**上（并发最容易错的就是下标错位） |
+| `PreviewTranslate_NoItemsIsBadRequest` | 空 items 是 400，不是 500 |
+
+★ 桩件里的 `hold`（每次调用停留 30ms）不是装饰：`fn` 本身太轻（只是拼几个字符串），
+goroutine 大概率「起一个、跑完、再起下一个」，并发计量恒为 1——
+那样这条测试会变成**加 `-race` 变绿、不加变红**的飘测试。停留让重叠成为必然，计量才是在测并发。
+
+### 10.3 miniapp `npm run typecheck` 归零（此前一直没跑成）
+
+此前卡在 `npm install`：沙箱挡掉了 `.bin` 链接阶段的 `rename`，`--no-bin-links` 也过不去，
+于是 `npx tsc` 起不来，类型检查一直是个「已知跑不了」的洞。
+
+**绕过方式**：把整棵依赖树装到 `/tmp/lc-miniapp-deps`（927 个包 / 395M），再从那里补回本地。
+`.bin` 软链缺失时不用 `npx`，直接调 `node node_modules/typescript/lib/tsc.js --noEmit`。
+结果：**0 错误**。
+
+★ 这里真正的坑不是软链，而是**被中断的 `npm install` 会留下「半安装的包」**：
+目录在、文件不全，`package.json` 甚至整个没有。此时 `tsc` 报
+`TS2307: Cannot find module '@tarojs/components' or its corresponding type declarations`——
+**看着像代码缺引用，实际是依赖树被砍了一半**。本次有 7 个包中招：
+
+| 包 | 完整 | 本地 |
+|---|---|---|
+| `@tarojs/components` | 1438 | **93** |
+| `@tarojs/runtime` | 171 | 43 |
+| `swiper` | 319 | 99 |
+| `hls.js` | 165 | 22 |
+| `lodash-es` | 429 | 405 |
+| `miniprogram-simulate` | 407 | 381 |
+| `less` | 128 | **1** |
+
+判别方法不是「重装一遍试试」（重装大概率被同一个原因再打断一次），
+而是**跟一份完整树按包比文件数**，只补真正残缺的那几个。
+大多数包差 1~2 个文件是 npm 元数据，别被这份噪声带偏——阈值要设（本次取「差 20 个以上」）。
+
+### 回归结果（2026-10-22 复测，全绿）
+
+| 套件 | 结果 |
+|---|---|
+| `go test ./...` | 全绿；`gofmt -l` 空、`go vet` 干净 |
+| `web` `tsc --noEmit` | 0 错误 |
+| `miniapp` `tsc --noEmit` | **0 错误（首次跑通）** |
+| `server/scripts/smoke.sh` | **77 / 0** |
+| `server/scripts/smoke_offline.sh` | **32 / 0** |
+| `server/scripts/smoke_admin.sh` | **24 / 0**（本轮 23 → 24） |
+| `web/scripts/guest-render-check.mjs` | **92 / 0**（本轮 75 → 92） |
+| `tools/indep_byte_uat.sh` | **75 / 0** |
+| `tools/check_doc_comments.py` | 0 / 0 |
+| 覆盖率 | 总 **40.3%**、httpapi **39.0%**（原目标 35% / 30%） |
+
+四套 + 独立 UAT 合计 **300 条断言**（77 + 32 + 92 + 24 + 75）。
+
+★ 本轮唯一的一次红，是**注释门禁**抓到 5 个新导出符号欠中文注释
+（Go 3 个在 `translate_parallel_test.go` 的桩件方法上，TS 2 个是 `TranslateKeys` 与 `ROLE_LABEL`）。
+值得记的是**它连测试文件一起扫**——新建测试桩时它的方法名也是导出符号。
+处理方式是**补注释**，不是 `--update-baseline` 抬基线：抬基线等于把欠账记为标准，
+正是这一路在修的「测试自己说谎」。
+
+### 文档同步（本轮）
+
+- **README**：断言计数 193（本身就与各表分项之和不符）→ **225**（77+32+92+24），并补上独立 UAT 75 条合计 300；
+  覆盖率 39%/36% → **40.3%/39.0%**；render-check 74+1 → **92**；超管脚本 **23 → 24**、
+  路径 `scripts/` → `server/scripts/`、默认端口 `:8081` → **`:8080`**；
+  目录结构按拆分后的实际文件重写（`guest/` 与 `admin/` 各成一组）；
+  新增「多语种并发编排」一条与「小程序端类型检查」一节；
+  纪律新增 25–27（批量外部调用要并发+有总截止时间 / 断言要等条件不要立刻判定 / 拆分前先看安全网是不是空的）；
+  「踩过的坑」补两条（跑之前先确认端口上是自己人；测试文件里的导出符号也在注释门禁范围内）。
+- **API.md**：`/api/stores/{id}/translate` 与 `/api/public/translate-preview` 补注「并发 + 45s 截止时间」；
+  超管脚本端口与路径刷新；测试覆盖表计数刷新；补一行提醒注释门禁扫 `*_test.go`。
+- **脚本提示文案**：`smoke.sh` / `smoke_offline.sh` / `smoke_admin.sh` / `reset_test_data.sh` /
+  `seed_demo.sh` 里 `bash scripts/xxx.sh` 一律改成 `bash server/scripts/xxx.sh`（与 Makefile 对齐），
+  并给离线兜底补上 `BASE=http://localhost:8099` 前缀。
 
 ---
 

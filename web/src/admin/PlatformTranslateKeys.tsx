@@ -21,6 +21,7 @@ type KeyRowUI = {
   rotateKey?: string
 }
 
+/** 分区主组件：列出脱敏 Key、就地试译 / 轮换 / 看明文，并新建 Key。提示条由外壳统一提供。 */
 export function TranslateKeys({ msg, setMsg }: { msg: string; setMsg: (s: string) => void }) {
   const [keys, setKeys] = useState<TranslateKey[]>([])
   const [activeId, setActiveId] = useState('') // 后端标记的当前生效 Key

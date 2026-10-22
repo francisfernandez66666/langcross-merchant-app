@@ -56,6 +56,10 @@ func newConcurrencyTranslator(gateN int) *concurrencyTranslator {
 	return &concurrencyTranslator{gateN: gateN, gate: make(chan struct{})}
 }
 
+// 实现编排器依赖的翻译接口：先记录 ctx 有没有带截止时间，再把「当前在翻的语种数」
+// 加一并更新峰值，随后按 gateN 卡住直到凑够并发才放行。
+// 边界：gateN=0 表示不设闸，进来即走；离开前必须把 cur 减回去（含走 ctx.Done() 的分支），
+// 否则并发计数虚高，后面的「并发被限幅」断言会被自己污染。
 func (c *concurrencyTranslator) Translate(ctx context.Context, texts []string, from, to string) ([]string, error) {
 	if _, ok := ctx.Deadline(); ok {
 		c.muDeadline.Lock()
@@ -101,7 +105,10 @@ func (c *concurrencyTranslator) Translate(ctx context.Context, texts []string, f
 	return out, nil
 }
 
+// 桩件恒定可用：让被测的编排逻辑只受并发与截止时间影响，不被引擎就绪态的分支带偏。
 func (c *concurrencyTranslator) Ready() bool { return true }
+
+// 引擎名只进日志与状态上报，桩件返回固定值，便于断言时能一眼分辨译文来自桩件还是真引擎。
 func (c *concurrencyTranslator) Name() string {
 	return "concurrency-stub"
 }

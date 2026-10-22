@@ -10,13 +10,13 @@
 #
 # 依赖外网的项一律用「软断言」（soft/softb）：失败只告警，不计入失败。
 # 需要**确定性**验证离线内置词典兜底与「绝不编造」纪律时，请跑：
-#   bash scripts/smoke_offline.sh
+#   BASE=http://localhost:8099 bash server/scripts/smoke_offline.sh
 #
 # ★ 前置的后端必须以开发模式启动（LC_DEV=1）：登录走固定验证码 000000。
 #   2026-10-19 起 LC_DEV 默认关闭（fail-safe），`make api` 已自动带上；
 #   手工启动记得写全：LC_DEV=1 go run ./cmd/api
 #
-# 用法：BASE=http://localhost:8080 bash scripts/smoke.sh
+# 用法（仓库根目录）：BASE=http://localhost:8080 bash server/scripts/smoke.sh
 # 退出码：0 = 全部通过；1 = 存在失败断言
 # ─────────────────────────────────────────────────────────────
 set -uo pipefail
@@ -317,8 +317,9 @@ eq "删除后图片不可访问(404)" "404" "$(curl -s -o /dev/null -w '%{http_c
 # ─────────────────────────────────────────────────────────────
 printf '\n\033[1m═══ 结果：%d 通过 / %d 失败 ═══\033[0m\n' "$PASS" "$FAIL"
 echo "本次测试门店：$B/s/$SLUG"
-echo "确定性离线兜底测试：bash scripts/smoke_offline.sh"
-echo "超管端到端冒烟　　：bash scripts/smoke_admin.sh（需 psql 提权，见脚本头注释）"
-echo "清理本次测试数据　：bash scripts/reset_test_data.sh"
+echo "确定性离线兜底测试：BASE=http://localhost:8099 bash server/scripts/smoke_offline.sh"
+echo "超管端到端冒烟　　：bash server/scripts/smoke_admin.sh（需 psql 提权，见脚本头注释）"
+echo "独立字节级 UAT　　：bash tools/indep_byte_uat.sh"
+echo "清理本次测试数据　：bash server/scripts/reset_test_data.sh"
 
 [ "$FAIL" -eq 0 ] || exit 1

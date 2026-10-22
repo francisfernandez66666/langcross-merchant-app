@@ -13,7 +13,7 @@
 #      （UPDATE account SET role='super_admin', tenant_id='' WHERE phone=...）。
 #      这只是开发库操作；生产库永远不要跑本脚本。
 #
-# 用法：bash scripts/smoke_admin.sh   （在仓库根目录执行；BASE 可按需覆盖）
+# 用法：bash server/scripts/smoke_admin.sh   （在仓库根目录执行；BASE 可按需覆盖）
 #
 # ★ 2026-10-22：默认端口从 8081 改成 8080。
 #   8081 是早期手工起服务时用的临时端口，`make api` 用的是 8080。
@@ -55,7 +55,7 @@ echo "── 0. 前置检查：目标 API 确实在 $BASE 上 ──"
 if ! curl --noproxy '*' -s --max-time 5 "$BASE/api/health" | grep -q '"ok"'; then
   echo "  ✗ $BASE 上没有可用的 API（/api/health 无响应），终止"
   echo "    先起服务（make api），或用 BASE 指定端口："
-  echo "      BASE=http://localhost:8080 bash scripts/smoke_admin.sh"
+  echo "      BASE=http://localhost:8080 bash server/scripts/smoke_admin.sh"
   exit 1
 fi
 # ★ ${BASE} 的花括号不能省：bash 下 $BASE 紧跟全角括号时，
