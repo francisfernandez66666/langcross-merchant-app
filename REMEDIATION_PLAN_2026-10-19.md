@@ -281,10 +281,13 @@ func (s *Server) guestLLMConfig(ctx context.Context, tenantID string) assist.LLM
 | `guest-render-check.mjs` | 62 / 0 |
 | `check_doc_comments.py` | go 0≤0 / fe 0≤0（新增 13 条假驱动方法注释） |
 
-### 剩余（下批次）
+### 剩余（下批次）—— 已全部闭环，见 §10
 
-FIX-10 覆盖率补层（httpapi 2.9% → 30%）、FIX-12 部署产物（nginx，`gzip on` 让 indep UAT 唯一失败项 B6 转绿）、FIX-13 god component 拆分。miniapp `npm run typecheck` 当时始终未跑成（沙箱挡了 `npm install` 的 `.bin` 软链阶段）
-→ **已于 2026-10-22 跑通并归零，见 §10.3。**
+当时记的四项：FIX-10 覆盖率补层（httpapi 2.9% → 30%）、FIX-12 部署产物（nginx，`gzip on` 让 indep UAT 唯一失败项 B6 转绿）、
+FIX-13 god component 拆分、miniapp `npm run typecheck`（当时始终未跑成，沙箱挡了 `npm install` 的 `.bin` 软链阶段）。
+
+→ **四项均已于 2026-10-22 闭环**：FIX-10 见 §9「第二轮补完」，FIX-12 见 §9，
+FIX-13 四组件全拆完见 §10.1，miniapp typecheck 归零见 §10.3。
 
 ---
 
